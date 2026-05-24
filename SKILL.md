@@ -108,6 +108,8 @@ If the user says "review anything", "random", or "anything is fine":
 
 Ask one item at a time. Do not use `db pending --include-content` for quizzing because it includes answer content. Mark correct answers with `db mark-done <item_id>`. For wrong or incomplete answers, run `db mark-wrong <item_id> --note "<brief reason>"` and keep the item pending.
 
+When the selected item returned by `db quiz` or `db due` includes attachments, display every available `prompt` attachment together with the question text in the same quiz message, in the returned order. Render each local image from its absolute `managed_path` using Markdown image syntax, such as `![<caption>](<managed_path>)`. If a `prompt` attachment has `missing: true` or cannot be displayed, still ask the text question and state briefly that the question image is currently unavailable. Never display a `solution` attachment while asking a quiz question.
+
 ## Command Paths
 
 Use these absolute paths:
@@ -162,6 +164,61 @@ Then add it:
 ```
 
 Use `collection_type` values `mistake_set` or `question_set`. Never add candidates the user excluded or did not select. Re-adding the same course, title, and original question updates the existing item instead of creating a duplicate.
+
+## Optional Image Attachments
+
+### Attachment Decision Rule
+
+Attach an image only when its visual information is necessary to solve or
+understand a question, such as a network diagram, geometry figure, chart,
+table, labelled map, hard-to-transcribe symbols, or when the user explicitly
+requests preservation. Do not attach decorative images or an image that adds
+nothing beyond complete and unambiguous text.
+
+Classify question-visible material as `prompt` and answer-revealing material
+as `solution`. Use provenance `provided` for an accessible source image and
+`reconstructed` for a faithful local recreation; never describe a reconstructed
+image as the original.
+
+Solution images must not appear in `db quiz`, `db due`, or `questions-only` exports.
+Use `full` export or `db search --include-content` only when showing answer
+material is appropriate.
+
+For quiz output, returning a `prompt` attachment is an instruction to display
+it with the question, not merely metadata to ignore. Display all available
+question images before waiting for the user's answer.
+
+After the user has selected a candidate question and explicitly requested or
+approved an essential image, include the optional attachment object documented
+in `references/schema.md`, then use the normal validation and add flow:
+
+```powershell
+<python> <script> db validate --input "<prepared-json-file>"
+<python> <script> db add --input "<prepared-json-file>" --confirmed-selection-by-user
+```
+
+For an already-saved question, add an image without replacing the question:
+
+```powershell
+<python> <script> db attach <item_id> --source "<image-path>" --role prompt --provenance provided --caption "<caption>"
+```
+
+Changing an attachment role can reveal answer material during review. Only run
+metadata changes or deletion after explicit user authorization:
+
+```powershell
+<python> <script> db attachment-update <attachment_id> --role <prompt|solution> --confirmed-by-user
+<python> <script> db detach <attachment_id> --confirmed-by-user
+<python> <script> db delete <item_id> --confirmed-by-user
+```
+
+Use `db attachment-audit` to report missing, modified, orphaned, or uncleaned
+managed files. Only use its cleanup flags after explicit user authorization.
+If an audit reports `unsafe_paths`, do not open, render, move, or delete those
+linked files through the skill. After explicit authorization, `db detach` or
+`db delete` may remove the database association and return
+`file_cleanup_skipped`; the external linked file remains for the user to
+handle directly.
 
 ## Search Questions
 
@@ -243,7 +300,7 @@ Before deletion, identify the exact stored question and item ID. After confirmat
 that ID:
 
 ```powershell
-<python> <script> db delete <item_id>
+<python> <script> db delete <item_id> --confirmed-by-user
 ```
 
 After deletion, search for the removed item or run `db stats --human` to verify the result.
@@ -278,9 +335,12 @@ New notes, searches, review prompts, and completion state must use SQLite `db` c
 - Trying system `python` or `py` before the fixed Python runtime.
 - Searching Markdown files instead of using `db search`.
 - Quizzing with `db pending --include-content`; use `db quiz` or `db due` instead.
+- Omitting an available `prompt` attachment when displaying a quiz question returned by `db quiz` or `db due`.
 - Exporting all stored questions without the user choosing a course or topic scope.
 - Including answers in a `questions-only` export, or including internal review metadata in either exported reading format.
 - Marking wrong answers with `mark-done`; wrong answers must use `mark-wrong`.
+- Revealing a `solution` image through `db quiz`, `db due`, or a `questions-only` export.
+- Changing, detaching, or deleting image attachments without explicit user authorization.
 - Renaming a course without the user's explicit confirmation of both the old and new names.
 - Deleting a question without the user's explicit request or confirmation of permanent deletion.
 - Asking what to review without listing courses from `db stats --human`.

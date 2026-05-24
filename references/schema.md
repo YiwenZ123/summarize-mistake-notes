@@ -17,7 +17,15 @@ Use this reference only when preparing import JSON, debugging `db validate`, or 
       "mistake_reason": "Confused function value with instantaneous rate of change.",
       "correct_approach": "Distinguish the function output from the derivative value.",
       "answer_points": ["A derivative gives instantaneous rate of change."],
-      "review_suggestion": "Redo three tangent-slope problems."
+      "review_suggestion": "Redo three tangent-slope problems.",
+      "attachments": [
+        {
+          "source_path": "D:\\path\\diagram.png",
+          "role": "prompt",
+          "provenance": "provided",
+          "caption": "Graph shown in the question"
+        }
+      ]
     }
   ]
 }
@@ -38,6 +46,18 @@ Use this reference only when preparing import JSON, debugging `db validate`, or 
 | `correct_approach` | Required correct reasoning or steps. |
 | `answer_points` | Required non-empty answer-point list. |
 | `review_suggestion` | Required actionable review suggestion. |
+| `attachments` | Optional list of essential image attachments; omission or an empty list preserves existing images during updates. |
+| `source_path` | Required per attachment; local path to a readable PNG, JPEG, or WebP image. |
+| `role` | Required per attachment; `prompt` for question-visible material or `solution` for answer-revealing material. |
+| `provenance` | Required per attachment; `provided` for an accessible source image or `reconstructed` for a recreated rendering. |
+| `caption` | Required non-empty attachment description, used in output and Markdown alt text. |
+
+## Optional Attachments
+
+Use attachments only when visual information is necessary to understand or
+solve a saved question, or when the user explicitly requests image
+preservation. A `solution` image is answer material and must not be exposed
+during quiz or questions-only export flows.
 
 Run validation before adding uncertain JSON:
 
