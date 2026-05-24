@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mistake Note Organizer"
+  short_description: "Organize, export, search, quiz, and maintain SQLite exercise-bank items"
+  default_prompt: "Use $summarize-mistake-notes to present candidate study questions before saving, export selected course or topic questions to Markdown, maintain confirmed labels, or quiz me without revealing the answer."
