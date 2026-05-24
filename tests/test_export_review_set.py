@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -249,6 +250,8 @@ class AttachmentImportTests(unittest.TestCase):
         added = self.add_input(self.make_input())
 
         self.assertEqual(0, added.returncode, added.stderr)
+        added_attachment = json.loads(added.stdout)["items"][0]["attachments"][0]
+        self.assertEqual("prompt", added_attachment["role"])
         attachment = self.find_item()["attachments"][0]
         managed_path = Path(attachment["managed_path"])
         self.assertEqual("prompt", attachment["role"])
@@ -281,6 +284,21 @@ class AttachmentImportTests(unittest.TestCase):
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertNotEqual(0, second.returncode)
         self.assertIn("attachment-update", second.stderr)
+
+    def test_add_rejects_modified_orphan_at_expected_destination(self):
+        added = self.add_input(self.make_input(attachment=False))
+        self.assertEqual(0, added.returncode, added.stderr)
+        item_id = json.loads(added.stdout)["ids"][0]
+        digest = hashlib.sha256(self.image_path.read_bytes()).hexdigest()
+        destination = self.root / "attachments" / item_id / f"network-{digest}.png"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"unexpected orphan content")
+
+        attempted = self.add_input(self.make_input())
+
+        self.assertNotEqual(0, attempted.returncode)
+        self.assertIn("differs from verified source digest", attempted.stderr)
+        self.assertNotIn("attachments", self.find_item())
 
     def test_attach_backfills_an_existing_text_only_question(self):
         added = self.add_input(self.make_input(attachment=False))
@@ -815,6 +833,28 @@ class ExportQuestionsInstructionsTests(unittest.TestCase):
         self.assertIn("Do not export all questions when neither a course nor a topic is specified", instructions)
         self.assertIn("A `full` export contains only each question title, `### 问题`, and `### 回答`", instructions)
         self.assertIn("Do not include database metadata, review status, knowledge points, correct approach, or review suggestion", instructions)
+
+
+class AttachmentInstructionsTests(unittest.TestCase):
+    def test_skill_documents_safe_optional_image_workflow(self):
+        instructions = SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("Attachment Decision Rule", instructions)
+        self.assertIn("`prompt`", instructions)
+        self.assertIn("`solution`", instructions)
+        self.assertIn(
+            "Solution images must not appear in `db quiz`, `db due`, or `questions-only` exports",
+            instructions,
+        )
+        self.assertIn("db attachment-update <attachment_id>", instructions)
+        self.assertIn("db detach <attachment_id> --confirmed-by-user", instructions)
+        self.assertIn("db delete <item_id> --confirmed-by-user", instructions)
+
+    def test_schema_documents_attachment_import_fields(self):
+        schema = (ROOT / "references" / "schema.md").read_text(encoding="utf-8")
+
+        for token in ("attachments", "source_path", "role", "provenance", "caption"):
+            self.assertIn(token, schema)
 
 
 class DeleteQuestionTests(unittest.TestCase):

@@ -544,6 +544,11 @@ def copy_managed_attachment(
 ) -> str:
     final_path, relative_path = attachment_destination(context, question_id, attachment)
     if final_path.exists():
+        digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        if digest != attachment["sha256"]:
+            raise ValueError(
+                f"Existing managed attachment differs from verified source digest: {final_path}"
+            )
         return relative_path
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.tmp"
@@ -707,11 +712,17 @@ def stage_managed_files(
         return None, []
     trash_root = context.attachments_root / ".trash" / uuid.uuid4().hex
     moves: list[tuple[Path, Path]] = []
-    for source in existing_paths:
-        destination = trash_root / source.relative_to(context.attachments_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        source.replace(destination)
-        moves.append((source, destination))
+    try:
+        for source in existing_paths:
+            destination = trash_root / source.relative_to(context.attachments_root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            moves.append((source, destination))
+    except OSError:
+        restore_staged_files(moves)
+        if trash_root.exists():
+            shutil.rmtree(trash_root, ignore_errors=True)
+        raise
     return trash_root, moves
 
 
@@ -1084,6 +1095,22 @@ def db_add(args: argparse.Namespace) -> int:
                     connection, data, export_date, context, created_files
                 )
                 connection.commit()
+                item_results: list[dict[str, Any]] = []
+                if any(item.get("attachments") for item in data["items"]):
+                    placeholders = ", ".join("?" for _ in ids)
+                    rows = connection.execute(
+                        f"""
+                        SELECT q.*, c.name AS course
+                        FROM questions q
+                        JOIN courses c ON c.id = q.course_id
+                        WHERE q.id IN ({placeholders})
+                        ORDER BY q.source_date ASC, q.created_at ASC, q.id ASC
+                        """,
+                        ids,
+                    ).fetchall()
+                    item_results = [row_to_question(row, include_content=False) for row in rows]
+                    attachment_map = load_attachments(connection, context, ids)
+                    add_attachments_to_items(item_results, attachment_map)
             except Exception:
                 connection.rollback()
                 raise
@@ -1098,6 +1125,8 @@ def db_add(args: argparse.Namespace) -> int:
         "updated": updated,
         "ids": ids,
     }
+    if item_results:
+        result["items"] = item_results
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
