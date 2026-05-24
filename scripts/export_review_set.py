@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import sys
+import uuid
 import warnings
 from dataclasses import dataclass
 from datetime import date
@@ -219,6 +221,26 @@ def verify_source_image(source_path: str) -> dict[str, Any]:
         "media_type": media_type,
         "extension": extension,
         "byte_size": byte_size,
+    }
+
+
+def validated_attachment_input(raw_attachment: dict[str, Any]) -> dict[str, Any]:
+    role = str(raw_attachment.get("role", "")).strip()
+    provenance = str(raw_attachment.get("provenance", "")).strip()
+    caption = str(raw_attachment.get("caption", "")).strip()
+    if role not in ALLOWED_ATTACHMENT_ROLES:
+        raise ValueError("Attachment role must be prompt or solution.")
+    if provenance not in ALLOWED_ATTACHMENT_PROVENANCE:
+        raise ValueError("Attachment provenance must be provided or reconstructed.")
+    if not caption:
+        raise ValueError("Attachment caption is required.")
+    verified = verify_source_image(str(raw_attachment.get("source_path", "")).strip())
+    return {
+        **verified,
+        "role": role,
+        "provenance": provenance,
+        "caption": caption,
+        "original_filename": verified["source"].name,
     }
 
 
@@ -500,6 +522,161 @@ def get_or_create_course(connection: sqlite3.Connection, course: str) -> int:
     return int(row["id"])
 
 
+def attachment_destination(
+    context: StorageContext,
+    question_id: str,
+    attachment: dict[str, Any],
+) -> tuple[Path, str]:
+    stem = clean_filename(attachment["source"].stem, "image", 60)
+    relative_path = (
+        Path("attachments")
+        / question_id
+        / f"{stem}-{attachment['sha256']}{attachment['extension']}"
+    )
+    return context.notes_root / relative_path, relative_path.as_posix()
+
+
+def copy_managed_attachment(
+    context: StorageContext,
+    question_id: str,
+    attachment: dict[str, Any],
+    created_files: list[Path],
+) -> str:
+    final_path, relative_path = attachment_destination(context, question_id, attachment)
+    if final_path.exists():
+        return relative_path
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copyfile(attachment["source"], temporary)
+        temporary.replace(final_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    created_files.append(final_path)
+    return relative_path
+
+
+def cleanup_created_attachment_files(created_files: list[Path], context: StorageContext) -> None:
+    for path in reversed(created_files):
+        if path.exists():
+            path.unlink()
+        parent = path.parent
+        while parent != context.attachments_root.parent and parent.exists():
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            if parent == context.attachments_root:
+                break
+            parent = parent.parent
+
+
+def add_attachment_row(
+    connection: sqlite3.Connection,
+    context: StorageContext,
+    question_id: str,
+    raw_attachment: dict[str, Any],
+    created_files: list[Path],
+) -> sqlite3.Row:
+    attachment = validated_attachment_input(raw_attachment)
+    existing = connection.execute(
+        "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
+        (question_id, attachment["sha256"]),
+    ).fetchone()
+    if existing is not None:
+        if (
+            existing["role"] != attachment["role"]
+            or existing["provenance"] != attachment["provenance"]
+            or existing["caption"] != attachment["caption"]
+        ):
+            raise ValueError(
+                "Attachment bytes are already linked with different metadata; "
+                "use db attachment-update after explicit user confirmation."
+            )
+        return existing
+    relative_path = copy_managed_attachment(context, question_id, attachment, created_files)
+    connection.execute(
+        """
+        INSERT INTO question_attachments (
+            question_id, role, provenance, stored_relative_path, original_filename,
+            caption, sha256, media_type, byte_size, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            question_id,
+            attachment["role"],
+            attachment["provenance"],
+            relative_path,
+            attachment["original_filename"],
+            attachment["caption"],
+            attachment["sha256"],
+            attachment["media_type"],
+            attachment["byte_size"],
+            now_iso(),
+        ),
+    )
+    return connection.execute(
+        "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
+        (question_id, attachment["sha256"]),
+    ).fetchone()
+
+
+def serialize_attachment(row: sqlite3.Row, context: StorageContext) -> dict[str, Any]:
+    managed_path = context.notes_root / Path(row["stored_relative_path"])
+    return {
+        "id": row["id"],
+        "role": row["role"],
+        "provenance": row["provenance"],
+        "caption": row["caption"],
+        "stored_relative_path": row["stored_relative_path"],
+        "managed_path": str(managed_path),
+        "media_type": row["media_type"],
+        "byte_size": row["byte_size"],
+        "missing": not managed_path.exists(),
+    }
+
+
+def load_attachments(
+    connection: sqlite3.Connection,
+    context: StorageContext,
+    question_ids: list[str],
+    role: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if not question_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in question_ids)
+    params: list[Any] = list(question_ids)
+    role_sql = ""
+    if role:
+        role_sql = " AND role = ?"
+        params.append(role)
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM question_attachments
+        WHERE question_id IN ({placeholders}){role_sql}
+        ORDER BY question_id, role, id
+        """,
+        params,
+    ).fetchall()
+    attachments: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        attachments.setdefault(row["question_id"], []).append(serialize_attachment(row, context))
+    return attachments
+
+
+def add_attachments_to_items(
+    items: list[dict[str, Any]],
+    attachment_map: dict[str, list[dict[str, Any]]],
+) -> None:
+    for item in items:
+        attachments = attachment_map.get(item["id"], [])
+        if attachments:
+            item["attachments"] = attachments
+
+
 def normalize_question_for_db(
     data: dict[str, Any],
     raw_item: dict[str, Any],
@@ -646,7 +823,13 @@ def render_db_question_export(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def insert_questions(connection: sqlite3.Connection, data: dict[str, Any], export_date: str) -> tuple[int, int, list[str]]:
+def insert_questions(
+    connection: sqlite3.Connection,
+    data: dict[str, Any],
+    export_date: str,
+    context: StorageContext | None = None,
+    created_files: list[Path] | None = None,
+) -> tuple[int, int, list[str]]:
     validate_review_data(data)
     course = required_text(data, "course")
     raw_items = data.get("items")
@@ -715,8 +898,19 @@ def insert_questions(connection: sqlite3.Connection, data: dict[str, Any], expor
             updated += 1
         else:
             inserted += 1
+        attachments = raw_item.get("attachments", [])
+        if attachments:
+            if context is None or created_files is None:
+                raise ValueError("Attachment storage context is required when adding images.")
+            for raw_attachment in attachments:
+                add_attachment_row(
+                    connection,
+                    context,
+                    question["id"],
+                    raw_attachment,
+                    created_files,
+                )
 
-    connection.commit()
     return inserted, updated, ids
 
 
@@ -752,6 +946,8 @@ def build_question_query(
 
 
 def db_add(args: argparse.Namespace) -> int:
+    created_files: list[Path] = []
+    context: StorageContext | None = None
     try:
         if not args.confirmed_selection_by_user:
             raise ValueError(
@@ -763,10 +959,20 @@ def db_add(args: argparse.Namespace) -> int:
         export_date = validate_export_date(
             args.date or str(data.get("source_date", "")).strip() or date.today().isoformat()
         )
-        db_path = get_db_path(args.config, args.db_path)
+        context = resolve_storage_context(args.config, args.db_path, args.notes_root)
+        db_path = context.db_path
         with connect_db(db_path) as connection:
-            inserted, updated, ids = insert_questions(connection, data, export_date)
+            try:
+                inserted, updated, ids = insert_questions(
+                    connection, data, export_date, context, created_files
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
     except (RuntimeError, ValueError, sqlite3.Error) as exc:
+        if context is not None:
+            cleanup_created_attachment_files(created_files, context)
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
     result = {
@@ -806,7 +1012,8 @@ def db_search(args: argparse.Namespace) -> int:
     try:
         if args.limit < 1:
             raise ValueError("--limit must be at least 1.")
-        db_path = get_db_path(args.config, args.db_path)
+        context = resolve_storage_context(args.config, args.db_path, args.notes_root)
+        db_path = context.db_path
         with connect_db(db_path) as connection:
             sql, params = build_question_query(
                 query=args.query,
@@ -815,14 +1022,58 @@ def db_search(args: argparse.Namespace) -> int:
                 limit=args.limit,
             )
             rows = connection.execute(sql, params).fetchall()
+            attachment_map = load_attachments(connection, context, [row["id"] for row in rows])
     except (RuntimeError, ValueError, sqlite3.Error) as exc:
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
     items = [row_to_question(row, args.include_content) for row in rows]
+    add_attachments_to_items(items, attachment_map)
     result = {
         "db_path": str(db_path),
         "returned_count": len(items),
         "items": items,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def db_attach(args: argparse.Namespace) -> int:
+    created_files: list[Path] = []
+    context: StorageContext | None = None
+    try:
+        context = resolve_storage_context(args.config, args.db_path, args.notes_root)
+        with connect_db(context.db_path) as connection:
+            try:
+                question = connection.execute(
+                    "SELECT id FROM questions WHERE id = ?", (args.item_id,)
+                ).fetchone()
+                if question is None:
+                    raise ValueError(f"Question not found: {args.item_id}")
+                attachment = add_attachment_row(
+                    connection,
+                    context,
+                    args.item_id,
+                    {
+                        "source_path": args.source,
+                        "role": args.role,
+                        "provenance": args.provenance,
+                        "caption": args.caption,
+                    },
+                    created_files,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+    except (RuntimeError, ValueError, sqlite3.Error) as exc:
+        if context is not None:
+            cleanup_created_attachment_files(created_files, context)
+        return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
+
+    result = {
+        "db_path": str(context.db_path),
+        "item_id": args.item_id,
+        "attachment": serialize_attachment(attachment, context),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1191,6 +1442,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_add_parser.add_argument("--input", required=True, help="JSON file path, or '-' for stdin.")
     db_add_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     db_add_parser.add_argument("--db-path", help="Override database path for this run.")
+    db_add_parser.add_argument("--notes-root", help="Override managed attachment root for this run.")
     db_add_parser.add_argument("--date", help="Source/export date, YYYY-MM-DD. Defaults to today.")
     db_add_parser.add_argument(
         "--confirmed-selection-by-user",
@@ -1227,6 +1479,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_search_parser.add_argument("--include-content", action="store_true")
     db_search_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     db_search_parser.add_argument("--db-path", help="Override database path for this run.")
+    db_search_parser.add_argument("--notes-root", help="Override managed attachment root for this run.")
 
     db_pending_parser = db_subparsers.add_parser(
         "pending", help="List unchecked questions, oldest first."
@@ -1237,6 +1490,21 @@ def build_parser() -> argparse.ArgumentParser:
     db_pending_parser.add_argument("--include-content", action="store_true")
     db_pending_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     db_pending_parser.add_argument("--db-path", help="Override database path for this run.")
+    db_pending_parser.add_argument("--notes-root", help="Override managed attachment root for this run.")
+
+    db_attach_parser = db_subparsers.add_parser(
+        "attach", help="Attach one verified image to an existing question."
+    )
+    db_attach_parser.add_argument("item_id", help="Question id from db search/pending.")
+    db_attach_parser.add_argument("--source", required=True, help="Local source image path.")
+    db_attach_parser.add_argument("--role", choices=sorted(ALLOWED_ATTACHMENT_ROLES), required=True)
+    db_attach_parser.add_argument(
+        "--provenance", choices=sorted(ALLOWED_ATTACHMENT_PROVENANCE), required=True
+    )
+    db_attach_parser.add_argument("--caption", required=True)
+    db_attach_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    db_attach_parser.add_argument("--db-path", help="Override database path for this run.")
+    db_attach_parser.add_argument("--notes-root", help="Override managed attachment root for this run.")
 
     for command_name, help_text in (
         ("quiz", "List unanswered quiz prompts without answer content."),
@@ -1324,6 +1592,8 @@ def main(argv: list[str] | None = None) -> int:
             return db_search(args)
         if args.db_command == "pending":
             return db_pending(args)
+        if args.db_command == "attach":
+            return db_attach(args)
         if args.db_command in {"quiz", "due"}:
             return db_quiz(args)
         if args.db_command == "mark-done":

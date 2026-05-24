@@ -178,6 +178,135 @@ class AttachmentFoundationTests(unittest.TestCase):
         self.assertFalse((self.root / "attachments").exists())
 
 
+class AttachmentImportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "exercise_bank.sqlite3"
+        self.image_path = write_image(self.root / "network.png")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [str(PYTHON), str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def make_input(self, *, attachment=True, role="prompt", source_path=None):
+        item = {
+            "title": "Link layout",
+            "original_question": "Which link is tolled?",
+            "knowledge_points": ["Network representation"],
+            "mistake_reason": "Needs review",
+            "correct_approach": "Read the network figure.",
+            "answer_points": ["Link 2 is tolled."],
+            "review_suggestion": "Re-read the prompt figure.",
+        }
+        if attachment:
+            item["attachments"] = [
+                {
+                    "source_path": str(source_path or self.image_path),
+                    "role": role,
+                    "provenance": "provided",
+                    "caption": "Prompt network",
+                }
+            ]
+        input_path = self.root / f"input-{role}-{attachment}.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "course": "Images",
+                    "collection_type": "question_set",
+                    "topic": "Managed image",
+                    "items": [item],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return input_path
+
+    def add_input(self, input_path):
+        return self.run_cli(
+            "db",
+            "add",
+            "--input",
+            str(input_path),
+            "--confirmed-selection-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+
+    def find_item(self):
+        searched = self.run_cli("db", "search", "--db-path", str(self.db_path))
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        return json.loads(searched.stdout)["items"][0]
+
+    def test_add_with_prompt_image_copies_file_and_returns_metadata(self):
+        added = self.add_input(self.make_input())
+
+        self.assertEqual(0, added.returncode, added.stderr)
+        attachment = self.find_item()["attachments"][0]
+        managed_path = Path(attachment["managed_path"])
+        self.assertEqual("prompt", attachment["role"])
+        self.assertEqual("image/png", attachment["media_type"])
+        self.assertTrue(managed_path.exists())
+        self.assertEqual(self.root / "attachments", managed_path.parents[1])
+
+    def test_jpeg_input_is_stored_with_canonical_jpg_extension(self):
+        jpeg_path = write_image(self.root / "figure.untrusted", "JPEG")
+
+        added = self.add_input(self.make_input(source_path=jpeg_path))
+
+        self.assertEqual(0, added.returncode, added.stderr)
+        attachment = self.find_item()["attachments"][0]
+        self.assertEqual(".jpg", Path(attachment["managed_path"]).suffix)
+
+    def test_add_duplicate_image_keeps_one_managed_copy(self):
+        first = self.add_input(self.make_input())
+        second = self.add_input(self.make_input())
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual(1, len(self.find_item()["attachments"]))
+        self.assertEqual(1, len(list((self.root / "attachments").rglob("*.png"))))
+
+    def test_duplicate_image_with_different_role_requires_metadata_update(self):
+        first = self.add_input(self.make_input(role="prompt"))
+        second = self.add_input(self.make_input(role="solution"))
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertNotEqual(0, second.returncode)
+        self.assertIn("attachment-update", second.stderr)
+
+    def test_attach_backfills_an_existing_text_only_question(self):
+        added = self.add_input(self.make_input(attachment=False))
+        self.assertEqual(0, added.returncode, added.stderr)
+        item_id = json.loads(added.stdout)["ids"][0]
+
+        attached = self.run_cli(
+            "db",
+            "attach",
+            item_id,
+            "--source",
+            str(self.image_path),
+            "--role",
+            "prompt",
+            "--provenance",
+            "provided",
+            "--caption",
+            "Prompt network",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertEqual(0, attached.returncode, attached.stderr)
+        self.assertEqual("prompt", self.find_item()["attachments"][0]["role"])
+
+
 class ExportQuestionsTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
