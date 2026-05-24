@@ -554,6 +554,9 @@ def copy_managed_attachment(
     temporary = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.tmp"
     try:
         shutil.copyfile(attachment["source"], temporary)
+        copied_digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        if copied_digest != attachment["sha256"]:
+            raise ValueError(f"Attachment source changed while copying: {attachment['source']}")
         temporary.replace(final_path)
     finally:
         if temporary.exists():
@@ -1076,6 +1079,7 @@ def build_question_query(
 def db_add(args: argparse.Namespace) -> int:
     created_files: list[Path] = []
     context: StorageContext | None = None
+    committed = False
     try:
         if not args.confirmed_selection_by_user:
             raise ValueError(
@@ -1095,6 +1099,7 @@ def db_add(args: argparse.Namespace) -> int:
                     connection, data, export_date, context, created_files
                 )
                 connection.commit()
+                committed = True
                 item_results: list[dict[str, Any]] = []
                 if any(item.get("attachments") for item in data["items"]):
                     placeholders = ", ".join("?" for _ in ids)
@@ -1115,7 +1120,7 @@ def db_add(args: argparse.Namespace) -> int:
                 connection.rollback()
                 raise
     except (RuntimeError, ValueError, sqlite3.Error, OSError) as exc:
-        if context is not None:
+        if context is not None and not committed:
             cleanup_created_attachment_files(created_files, context)
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
