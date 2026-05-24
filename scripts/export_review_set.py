@@ -9,10 +9,14 @@ import json
 import re
 import sqlite3
 import sys
+import warnings
+from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, UnidentifiedImageError
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8")
@@ -37,6 +41,21 @@ REQUIRED_ITEM_TEXT_FIELDS = (
     "review_suggestion",
 )
 REQUIRED_ITEM_LIST_FIELDS = ("knowledge_points", "answer_points")
+ALLOWED_ATTACHMENT_ROLES = {"prompt", "solution"}
+ALLOWED_ATTACHMENT_PROVENANCE = {"provided", "reconstructed"}
+ATTACHMENT_MEDIA_TYPES = {
+    "PNG": ("image/png", ".png"),
+    "JPEG": ("image/jpeg", ".jpg"),
+    "WEBP": ("image/webp", ".webp"),
+}
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class StorageContext:
+    db_path: Path
+    notes_root: Path
+    attachments_root: Path
 
 
 def fail(message: str, code: int = 1) -> int:
@@ -114,6 +133,25 @@ def get_db_path(config_path: Path, override: str | None = None) -> Path:
     return get_notes_root(config_path) / DB_NAME
 
 
+def resolve_storage_context(
+    config_path: Path,
+    db_override: str | None = None,
+    notes_override: str | None = None,
+) -> StorageContext:
+    db_path = get_db_path(config_path, db_override)
+    if notes_override:
+        notes_root = Path(notes_override).expanduser().resolve()
+    elif db_override:
+        notes_root = db_path.parent
+    else:
+        notes_root = get_notes_root(config_path)
+    return StorageContext(
+        db_path=db_path,
+        notes_root=notes_root,
+        attachments_root=notes_root / "attachments",
+    )
+
+
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -151,6 +189,39 @@ def normalize_collection_type(value: Any) -> str:
     return LEGACY_COLLECTION_TYPE_ALIASES.get(raw, "")
 
 
+def verify_source_image(source_path: str) -> dict[str, Any]:
+    source = Path(source_path).expanduser().resolve()
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"Attachment source is not a readable file: {source}")
+    byte_size = source.stat().st_size
+    if byte_size > MAX_ATTACHMENT_BYTES:
+        raise ValueError(f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {source}")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                image.verify()
+                image_format = str(image.format or "").upper()
+    except (
+        UnidentifiedImageError,
+        OSError,
+        Image.DecompressionBombWarning,
+        Image.DecompressionBombError,
+    ) as exc:
+        raise ValueError(f"Attachment is not a valid image: {source}") from exc
+    if image_format not in ATTACHMENT_MEDIA_TYPES:
+        raise ValueError(f"Unsupported attachment image format: {image_format}")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    media_type, extension = ATTACHMENT_MEDIA_TYPES[image_format]
+    return {
+        "source": source,
+        "sha256": digest,
+        "media_type": media_type,
+        "extension": extension,
+        "byte_size": byte_size,
+    }
+
+
 def validate_review_data(data: dict[str, Any]) -> None:
     errors: list[str] = []
 
@@ -183,6 +254,33 @@ def validate_review_data(data: dict[str, Any]) -> None:
                 value = raw_item.get(key)
                 if not isinstance(value, list) or not as_list(value):
                     errors.append(f"{prefix}.{key} must be a non-empty list.")
+            attachments = raw_item.get("attachments")
+            if attachments is not None:
+                if not isinstance(attachments, list):
+                    errors.append(f"{prefix}.attachments must be a list.")
+                    continue
+                for attachment_index, attachment in enumerate(attachments, start=1):
+                    attachment_prefix = f"{prefix}.attachments[{attachment_index}]"
+                    if not isinstance(attachment, dict):
+                        errors.append(f"{attachment_prefix} must be an object.")
+                        continue
+                    for key in ("source_path", "caption", "role", "provenance"):
+                        if not str(attachment.get(key, "")).strip():
+                            errors.append(f"{attachment_prefix}.{key} is required.")
+                    role = str(attachment.get("role", "")).strip()
+                    if role and role not in ALLOWED_ATTACHMENT_ROLES:
+                        errors.append(f"{attachment_prefix}.role must be prompt or solution.")
+                    provenance = str(attachment.get("provenance", "")).strip()
+                    if provenance and provenance not in ALLOWED_ATTACHMENT_PROVENANCE:
+                        errors.append(
+                            f"{attachment_prefix}.provenance must be provided or reconstructed."
+                        )
+                    source_path = str(attachment.get("source_path", "")).strip()
+                    if source_path:
+                        try:
+                            verify_source_image(source_path)
+                        except ValueError as exc:
+                            errors.append(f"{attachment_prefix}.source_path: {exc}")
 
     if errors:
         raise ValueError("Invalid question JSON:\n- " + "\n- ".join(errors))
@@ -361,6 +459,24 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             note TEXT,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS question_attachments (
+            id INTEGER PRIMARY KEY,
+            question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('prompt', 'solution')),
+            provenance TEXT NOT NULL CHECK (provenance IN ('provided', 'reconstructed')),
+            stored_relative_path TEXT NOT NULL UNIQUE,
+            original_filename TEXT NOT NULL,
+            caption TEXT NOT NULL CHECK (length(trim(caption)) > 0),
+            sha256 TEXT NOT NULL,
+            media_type TEXT NOT NULL CHECK (media_type IN ('image/png', 'image/jpeg', 'image/webp')),
+            byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+            created_at TEXT NOT NULL,
+            UNIQUE(question_id, sha256)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_question_attachments_question_role
+            ON question_attachments(question_id, role, id);
         """
     )
     columns = {

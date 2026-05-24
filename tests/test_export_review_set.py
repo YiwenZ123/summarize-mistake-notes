@@ -5,10 +5,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 
 PYTHON = Path(r"C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
-SCRIPT = Path(r"C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py")
-SKILL = Path(r"C:\Users\Zippe\.codex\skills\summarize-mistake-notes\SKILL.md")
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "export_review_set.py"
+SKILL = ROOT / "SKILL.md"
+
+
+def write_image(path, image_format="PNG"):
+    Image.new("RGB", (4, 4), color=(20, 40, 60)).save(path, format=image_format)
+    return path
 
 
 class AddQuestionSelectionTests(unittest.TestCase):
@@ -80,6 +88,94 @@ class AddQuestionSelectionInstructionsTests(unittest.TestCase):
             instructions,
         )
         self.assertIn('db add --input "<prepared-json-file>" --confirmed-selection-by-user', instructions)
+
+
+class AttachmentFoundationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "exercise_bank.sqlite3"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [str(PYTHON), str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def make_input(self, *, attachments=None):
+        input_path = self.root / "attachment-input.json"
+        item = {
+            "title": "Visual prompt",
+            "original_question": "Use the network figure to answer.",
+            "knowledge_points": ["Network representation"],
+            "mistake_reason": "Needs review",
+            "correct_approach": "Read the prompt diagram.",
+            "answer_points": ["Use the link data."],
+            "review_suggestion": "Retry with the diagram.",
+        }
+        if attachments is not None:
+            item["attachments"] = attachments
+        input_path.write_text(
+            json.dumps(
+                {
+                    "course": "Images",
+                    "collection_type": "question_set",
+                    "topic": "Attachment foundation",
+                    "items": [item],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return input_path
+
+    def test_text_only_add_creates_attachment_table_without_changing_item_shape(self):
+        added = self.run_cli(
+            "db",
+            "add",
+            "--input",
+            str(self.make_input()),
+            "--confirmed-selection-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        found = self.run_cli("db", "search", "--db-path", str(self.db_path))
+        self.assertEqual(0, found.returncode, found.stderr)
+        self.assertNotIn("attachments", json.loads(found.stdout)["items"][0])
+        connection = sqlite3.connect(self.db_path)
+        try:
+            table_names = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+        finally:
+            connection.close()
+        self.assertIn("question_attachments", table_names)
+
+    def test_validate_rejects_non_image_renamed_png_without_writing_files(self):
+        bad_image = self.root / "fake.png"
+        bad_image.write_text("not an image", encoding="utf-8")
+        input_path = self.make_input(
+            attachments=[
+                {
+                    "source_path": str(bad_image),
+                    "role": "prompt",
+                    "provenance": "provided",
+                    "caption": "Fake diagram",
+                }
+            ]
+        )
+
+        validated = self.run_cli("db", "validate", "--input", str(input_path))
+
+        self.assertNotEqual(0, validated.returncode)
+        self.assertIn("valid image", validated.stderr)
+        self.assertFalse((self.root / "attachments").exists())
 
 
 class ExportQuestionsTests(unittest.TestCase):
