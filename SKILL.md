@@ -108,6 +108,8 @@ If the user says "review anything", "random", or "anything is fine":
 
 Ask one item at a time. Do not use `db pending --include-content` for quizzing because it includes answer content. Mark correct answers with `db mark-done <item_id>`. For wrong or incomplete answers, run `db mark-wrong <item_id> --note "<brief reason>"` and keep the item pending.
 
+When the selected item returned by `db quiz` or `db due` includes attachments, display every available `prompt` attachment together with the question text in the same quiz message, in the returned order. Render each local image from its absolute `managed_path` using Markdown image syntax, such as `![<caption>](<managed_path>)`. If a `prompt` attachment has `missing: true` or cannot be displayed, still ask the text question and state briefly that the question image is currently unavailable. Never display a `solution` attachment while asking a quiz question.
+
 ## Command Paths
 
 Use these absolute paths:
@@ -181,6 +183,10 @@ image as the original.
 Solution images must not appear in `db quiz`, `db due`, or `questions-only` exports.
 Use `full` export or `db search --include-content` only when showing answer
 material is appropriate.
+
+For quiz output, returning a `prompt` attachment is an instruction to display
+it with the question, not merely metadata to ignore. Display all available
+question images before waiting for the user's answer.
 
 After the user has selected a candidate question and explicitly requested or
 approved an essential image, include the optional attachment object documented
@@ -329,6 +335,7 @@ New notes, searches, review prompts, and completion state must use SQLite `db` c
 - Trying system `python` or `py` before the fixed Python runtime.
 - Searching Markdown files instead of using `db search`.
 - Quizzing with `db pending --include-content`; use `db quiz` or `db due` instead.
+- Omitting an available `prompt` attachment when displaying a quiz question returned by `db quiz` or `db due`.
 - Exporting all stored questions without the user choosing a course or topic scope.
 - Including answers in a `questions-only` export, or including internal review metadata in either exported reading format.
 - Marking wrong answers with `mark-done`; wrong answers must use `mark-wrong`.
