@@ -437,6 +437,195 @@ class AttachmentVisibilityTests(unittest.TestCase):
         self.assertIn("differs from stored digest", exported.stderr)
 
 
+class AttachmentMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "exercise_bank.sqlite3"
+        prompt_path = write_image(self.root / "prompt.png")
+        solution_path = self.root / "solution.png"
+        Image.new("RGB", (4, 4), color=(150, 80, 10)).save(solution_path, format="PNG")
+        input_path = self.root / "maintenance.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "course": "Maintenance",
+                    "collection_type": "mistake_set",
+                    "topic": "Attachment maintenance",
+                    "items": [
+                        {
+                            "title": "Maintain attachments",
+                            "original_question": "Read the drawing.",
+                            "knowledge_points": ["Maintenance"],
+                            "mistake_reason": "Needs review",
+                            "correct_approach": "Review managed images.",
+                            "answer_points": ["Keep safe files."],
+                            "review_suggestion": "Audit later.",
+                            "attachments": [
+                                {
+                                    "source_path": str(prompt_path),
+                                    "role": "prompt",
+                                    "provenance": "provided",
+                                    "caption": "maintenance-prompt",
+                                },
+                                {
+                                    "source_path": str(solution_path),
+                                    "role": "solution",
+                                    "provenance": "provided",
+                                    "caption": "maintenance-solution",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        added = self.run_cli(
+            "db",
+            "add",
+            "--input",
+            str(input_path),
+            "--confirmed-selection-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        self.item_id = json.loads(added.stdout)["ids"][0]
+        item = self.search_item()
+        self.prompt = next(a for a in item["attachments"] if a["role"] == "prompt")
+        self.solution = next(a for a in item["attachments"] if a["role"] == "solution")
+        self.question_dir = Path(self.prompt["managed_path"]).parent
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [str(PYTHON), str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def search_item(self):
+        searched = self.run_cli("db", "search", "--db-path", str(self.db_path))
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        return json.loads(searched.stdout)["items"][0]
+
+    def test_attachment_update_requires_confirmation_before_role_change(self):
+        rejected = self.run_cli(
+            "db",
+            "attachment-update",
+            str(self.solution["id"]),
+            "--role",
+            "prompt",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("explicit user confirmation", rejected.stderr)
+        changed = self.run_cli(
+            "db",
+            "attachment-update",
+            str(self.solution["id"]),
+            "--role",
+            "prompt",
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, changed.returncode, changed.stderr)
+        roles = [a["role"] for a in self.search_item()["attachments"]]
+        self.assertEqual(["prompt", "prompt"], roles)
+
+    def test_detach_requires_confirmation_and_preserves_unmanaged_file(self):
+        unmanaged = self.question_dir / "keep-me.txt"
+        unmanaged.write_text("do not delete", encoding="utf-8")
+        rejected = self.run_cli(
+            "db", "detach", str(self.prompt["id"]), "--db-path", str(self.db_path)
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("explicit user confirmation", rejected.stderr)
+
+        detached = self.run_cli(
+            "db",
+            "detach",
+            str(self.prompt["id"]),
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertEqual(0, detached.returncode, detached.stderr)
+        self.assertFalse(Path(self.prompt["managed_path"]).exists())
+        self.assertTrue(unmanaged.exists())
+        self.assertEqual(1, len(self.search_item()["attachments"]))
+
+    def test_delete_requires_confirmation_before_removing_managed_files(self):
+        rejected = self.run_cli("db", "delete", self.item_id, "--db-path", str(self.db_path))
+
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("explicit user confirmation", rejected.stderr)
+        self.assertTrue(Path(self.prompt["managed_path"]).exists())
+
+    def test_confirmed_delete_removes_referenced_images_and_preserves_unmanaged_file(self):
+        unmanaged = self.question_dir / "keep-me.txt"
+        unmanaged.write_text("not managed", encoding="utf-8")
+
+        deleted = self.run_cli(
+            "db",
+            "delete",
+            self.item_id,
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertEqual(0, deleted.returncode, deleted.stderr)
+        self.assertFalse(Path(self.prompt["managed_path"]).exists())
+        self.assertFalse(Path(self.solution["managed_path"]).exists())
+        self.assertTrue(unmanaged.exists())
+
+    def test_audit_reports_missing_modified_and_orphan_files_without_deleting(self):
+        Path(self.prompt["managed_path"]).unlink()
+        Path(self.solution["managed_path"]).write_bytes(b"altered")
+        orphan = self.question_dir / "orphan.png"
+        write_image(orphan)
+
+        audit = self.run_cli("db", "attachment-audit", "--db-path", str(self.db_path))
+
+        self.assertEqual(0, audit.returncode, audit.stderr)
+        report = json.loads(audit.stdout)
+        self.assertEqual(1, len(report["missing_files"]))
+        self.assertEqual(1, len(report["modified_files"]))
+        self.assertEqual([str(orphan)], report["orphan_files"])
+        self.assertTrue(orphan.exists())
+
+    def test_audit_cleanup_requires_confirmation_and_can_prune_orphans(self):
+        orphan = self.question_dir / "orphan.png"
+        write_image(orphan)
+
+        rejected = self.run_cli(
+            "db", "attachment-audit", "--prune-orphans", "--db-path", str(self.db_path)
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("explicit user confirmation", rejected.stderr)
+        self.assertTrue(orphan.exists())
+
+        cleaned = self.run_cli(
+            "db",
+            "attachment-audit",
+            "--prune-orphans",
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, cleaned.returncode, cleaned.stderr)
+        self.assertFalse(orphan.exists())
+
+
 class ExportQuestionsTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -681,7 +870,14 @@ class DeleteQuestionTests(unittest.TestCase):
         marked = self.run_cli("db", "mark-wrong", self.item_id, "--db-path", str(self.db_path))
         self.assertEqual(0, marked.returncode, marked.stderr)
 
-        deleted = self.run_cli("db", "delete", self.item_id, "--db-path", str(self.db_path))
+        deleted = self.run_cli(
+            "db",
+            "delete",
+            self.item_id,
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
 
         self.assertEqual(0, deleted.returncode, deleted.stderr)
         self.assertEqual(self.item_id, json.loads(deleted.stdout)["deleted_item"]["id"])
@@ -693,7 +889,14 @@ class DeleteQuestionTests(unittest.TestCase):
             connection.close()
 
     def test_delete_missing_question_fails(self):
-        deleted = self.run_cli("db", "delete", "missing-item", "--db-path", str(self.db_path))
+        deleted = self.run_cli(
+            "db",
+            "delete",
+            "missing-item",
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
 
         self.assertNotEqual(0, deleted.returncode)
         self.assertIn("Question not found: missing-item", deleted.stderr)
