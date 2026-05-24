@@ -1,7 +1,10 @@
 import hashlib
+import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,11 +16,34 @@ PYTHON = Path(r"C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\depen
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "export_review_set.py"
 SKILL = ROOT / "SKILL.md"
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 def write_image(path, image_format="PNG"):
     Image.new("RGB", (4, 4), color=(20, 40, 60)).save(path, format=image_format)
     return path
+
+
+def load_script_module():
+    spec = importlib.util.spec_from_file_location("export_review_set_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_directory_link(link: Path, target: Path) -> None:
+    if sys.platform == "win32":
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if created.returncode != 0:
+            raise OSError(created.stderr or created.stdout)
+    else:
+        os.symlink(target, link, target_is_directory=True)
 
 
 class AddQuestionSelectionTests(unittest.TestCase):
@@ -268,6 +294,15 @@ class AttachmentImportTests(unittest.TestCase):
         attachment = self.find_item()["attachments"][0]
         self.assertEqual(".jpg", Path(attachment["managed_path"]).suffix)
 
+    def test_webp_input_is_stored_with_canonical_webp_extension(self):
+        webp_path = write_image(self.root / "figure.untrusted", "WEBP")
+
+        added = self.add_input(self.make_input(source_path=webp_path))
+
+        self.assertEqual(0, added.returncode, added.stderr)
+        attachment = self.find_item()["attachments"][0]
+        self.assertEqual(".webp", Path(attachment["managed_path"]).suffix)
+
     def test_add_duplicate_image_keeps_one_managed_copy(self):
         first = self.add_input(self.make_input())
         second = self.add_input(self.make_input())
@@ -323,6 +358,281 @@ class AttachmentImportTests(unittest.TestCase):
 
         self.assertEqual(0, attached.returncode, attached.stderr)
         self.assertEqual("prompt", self.find_item()["attachments"][0]["role"])
+
+    def test_second_attachment_failure_rolls_back_first_created_file(self):
+        added = self.add_input(self.make_input(attachment=False))
+        self.assertEqual(0, added.returncode, added.stderr)
+        item_id = json.loads(added.stdout)["ids"][0]
+        second_image = self.root / "second.png"
+        Image.new("RGB", (4, 4), color=(80, 10, 120)).save(second_image, format="PNG")
+        digest = hashlib.sha256(second_image.read_bytes()).hexdigest()
+        conflict = self.root / "attachments" / item_id / f"second-{digest}.png"
+        conflict.parent.mkdir(parents=True)
+        conflict.write_bytes(b"conflict")
+        input_path = self.root / "two-attachments.json"
+        payload = json.loads(self.make_input().read_text(encoding="utf-8"))
+        payload["items"][0]["attachments"].append(
+            {
+                "source_path": str(second_image),
+                "role": "prompt",
+                "provenance": "provided",
+                "caption": "Second prompt",
+            }
+        )
+        input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        attempted = self.add_input(input_path)
+
+        self.assertNotEqual(0, attempted.returncode)
+        self.assertNotIn("attachments", self.find_item())
+        first_copies = list((self.root / "attachments" / item_id).glob("network-*.png"))
+        self.assertEqual([], first_copies)
+
+    def test_concurrent_attach_keeps_one_valid_managed_copy(self):
+        added = self.add_input(self.make_input(attachment=False))
+        self.assertEqual(0, added.returncode, added.stderr)
+        item_id = json.loads(added.stdout)["ids"][0]
+        command = [
+            str(PYTHON),
+            str(SCRIPT),
+            "db",
+            "attach",
+            item_id,
+            "--source",
+            str(self.image_path),
+            "--role",
+            "prompt",
+            "--provenance",
+            "provided",
+            "--caption",
+            "Prompt network",
+            "--db-path",
+            str(self.db_path),
+        ]
+
+        first = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        second = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        first_stdout, first_stderr = first.communicate()
+        second_stdout, second_stderr = second.communicate()
+
+        self.assertEqual(0, first.returncode, first_stderr)
+        self.assertEqual(0, second.returncode, second_stderr)
+        item = self.find_item()
+        self.assertEqual(1, len(item["attachments"]))
+        managed = Path(item["attachments"][0]["managed_path"])
+        with Image.open(managed) as copied:
+            copied.verify()
+        self.assertEqual([], list(managed.parent.glob("*.tmp")))
+
+    def test_write_validates_the_copied_snapshot_not_a_stale_source_check(self):
+        added = self.add_input(self.make_input(attachment=False))
+        self.assertEqual(0, added.returncode, added.stderr)
+        item_id = json.loads(added.stdout)["ids"][0]
+        module = load_script_module()
+        original_open = module.Image.open
+        source = self.image_path.resolve()
+
+        class ReplacedAfterVerify:
+            def __init__(self, image):
+                self.image = image
+
+            def __enter__(self):
+                self.image.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.image.__exit__(*args)
+
+            @property
+            def format(self):
+                return self.image.format
+
+            def verify(self):
+                self.image.verify()
+                source.write_bytes(b"not an image after source validation")
+
+        def swap_source_after_validation(path, *args, **kwargs):
+            image = original_open(path, *args, **kwargs)
+            if Path(path).resolve() == source:
+                return ReplacedAfterVerify(image)
+            return image
+
+        context = module.StorageContext(self.db_path, self.root, self.root / "attachments")
+        created_files = []
+        connection = module.connect_db(self.db_path)
+        try:
+            module.Image.open = swap_source_after_validation
+            try:
+                row = module.add_attachment_row(
+                    connection,
+                    context,
+                    item_id,
+                    {
+                        "source_path": str(source),
+                        "role": "prompt",
+                        "provenance": "provided",
+                        "caption": "Prompt network",
+                    },
+                    created_files,
+                )
+                connection.commit()
+            finally:
+                module.Image.open = original_open
+        finally:
+            connection.close()
+        managed_path = Path(module.serialize_attachment(row, context)["managed_path"])
+        with Image.open(managed_path) as copied:
+            copied.verify()
+
+
+class AttachmentPathSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "exercise_bank.sqlite3"
+        self.image_path = write_image(self.root / "diagram.png")
+        self.input_path = self.root / "question.json"
+        self.input_path.write_text(
+            json.dumps(
+                {
+                    "course": "Path Safety",
+                    "collection_type": "question_set",
+                    "topic": "Attachments",
+                    "items": [
+                        {
+                            "title": "Safe attachment path",
+                            "original_question": "Inspect the diagram.",
+                            "knowledge_points": ["Path safety"],
+                            "mistake_reason": "Needs review",
+                            "correct_approach": "Keep files managed.",
+                            "answer_points": ["Do not follow links."],
+                            "review_suggestion": "Audit attachments.",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        added = self.run_cli(
+            "db",
+            "add",
+            "--input",
+            str(self.input_path),
+            "--confirmed-selection-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        self.item_id = json.loads(added.stdout)["ids"][0]
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [str(PYTHON), str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def attach(self):
+        return self.run_cli(
+            "db",
+            "attach",
+            self.item_id,
+            "--source",
+            str(self.image_path),
+            "--role",
+            "prompt",
+            "--provenance",
+            "provided",
+            "--caption",
+            "prompt-diagram",
+            "--db-path",
+            str(self.db_path),
+        )
+
+    def test_attach_rejects_junction_managed_root_without_writing_outside(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        make_directory_link(self.root / "attachments", outside)
+
+        attached = self.attach()
+
+        self.assertNotEqual(0, attached.returncode)
+        self.assertIn("Unsafe managed attachment path", attached.stderr)
+        self.assertEqual([], list(outside.rglob("*")))
+
+    def test_snapshot_rejects_parent_directory_question_component(self):
+        module = load_script_module()
+        context = module.StorageContext(self.db_path, self.root, self.root / "attachments")
+
+        with self.assertRaisesRegex(ValueError, "Unsafe managed attachment path"):
+            module.create_verified_snapshot(
+                context,
+                "..",
+                {
+                    "source_path": str(self.image_path),
+                    "role": "prompt",
+                    "provenance": "provided",
+                    "caption": "prompt-diagram",
+                },
+            )
+
+        self.assertEqual([], list(self.root.glob(".incoming-*.tmp")))
+
+    def test_unsafe_linked_question_directory_is_reported_and_detachable_without_file_delete(self):
+        attached = self.attach()
+        self.assertEqual(0, attached.returncode, attached.stderr)
+        attachment = json.loads(attached.stdout)["attachment"]
+        original_dir = Path(attachment["managed_path"]).parent
+        outside = self.root / "outside-question"
+        original_dir.rename(outside)
+        make_directory_link(original_dir, outside)
+
+        exported = self.run_cli(
+            "db", "export", "--course", "Path Safety", "--mode", "questions-only", "--db-path", str(self.db_path)
+        )
+        audited = self.run_cli("db", "attachment-audit", "--db-path", str(self.db_path))
+        detached = self.run_cli(
+            "db",
+            "detach",
+            str(attachment["id"]),
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertNotEqual(0, exported.returncode)
+        self.assertIn("Unsafe managed attachment path", exported.stderr)
+        self.assertEqual(0, audited.returncode, audited.stderr)
+        self.assertTrue(json.loads(audited.stdout)["unsafe_paths"])
+        self.assertEqual(0, detached.returncode, detached.stderr)
+        self.assertTrue(json.loads(detached.stdout)["file_cleanup_skipped"])
+        self.assertTrue((outside / Path(attachment["managed_path"]).name).exists())
+
+    def test_unsafe_linked_question_directory_allows_metadata_delete_without_file_delete(self):
+        attached = self.attach()
+        self.assertEqual(0, attached.returncode, attached.stderr)
+        attachment = json.loads(attached.stdout)["attachment"]
+        original_dir = Path(attachment["managed_path"]).parent
+        outside = self.root / "outside-delete"
+        original_dir.rename(outside)
+        make_directory_link(original_dir, outside)
+
+        deleted = self.run_cli(
+            "db",
+            "delete",
+            self.item_id,
+            "--confirmed-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+
+        self.assertEqual(0, deleted.returncode, deleted.stderr)
+        self.assertTrue(json.loads(deleted.stdout)["file_cleanup_skipped"])
+        self.assertTrue((outside / Path(attachment["managed_path"]).name).exists())
 
 
 class AttachmentVisibilityTests(unittest.TestCase):
@@ -452,7 +762,58 @@ class AttachmentVisibilityTests(unittest.TestCase):
         )
 
         self.assertNotEqual(0, exported.returncode)
-        self.assertIn("differs from stored digest", exported.stderr)
+        self.assertIn("differs from stored", exported.stderr)
+
+    def test_export_encodes_attachment_paths_and_normalizes_multiline_caption(self):
+        special_path = self.root / "route #图(1).png"
+        Image.new("RGB", (4, 4), color=(40, 90, 150)).save(special_path, format="PNG")
+        item = json.loads(
+            self.run_cli("db", "search", "--course", "Images", "--db-path", str(self.db_path)).stdout
+        )["items"][0]
+        attached = self.run_cli(
+            "db",
+            "attach",
+            item["id"],
+            "--source",
+            str(special_path),
+            "--role",
+            "prompt",
+            "--provenance",
+            "provided",
+            "--caption",
+            "network\n[detail]",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, attached.returncode, attached.stderr)
+
+        content = self.export_content("questions-only")
+
+        self.assertIn("![network \\[detail\\]]", content)
+        self.assertIn("route%20%23%E5%9B%BE%281%29-", content)
+        self.assertNotIn("network\n", content)
+
+    def test_export_rejects_replaced_oversized_attachment_before_hashing(self):
+        searched = json.loads(
+            self.run_cli("db", "search", "--course", "Images", "--db-path", str(self.db_path)).stdout
+        )
+        prompt = next(
+            attachment
+            for attachment in searched["items"][0]["attachments"]
+            if attachment["role"] == "prompt"
+        )
+        with Path(prompt["managed_path"]).open("wb") as handle:
+            handle.truncate(MAX_ATTACHMENT_BYTES + 1)
+
+        exported = self.run_cli(
+            "db", "export", "--course", "Images", "--mode", "questions-only", "--db-path", str(self.db_path)
+        )
+        audit = self.run_cli("db", "attachment-audit", "--db-path", str(self.db_path))
+
+        self.assertNotEqual(0, exported.returncode)
+        self.assertIn("size differs", exported.stderr)
+        self.assertEqual(0, audit.returncode, audit.stderr)
+        self.assertEqual(1, len(json.loads(audit.stdout)["modified_files"]))
 
 
 class AttachmentMaintenanceTests(unittest.TestCase):
@@ -849,6 +1210,8 @@ class AttachmentInstructionsTests(unittest.TestCase):
         self.assertIn("db attachment-update <attachment_id>", instructions)
         self.assertIn("db detach <attachment_id> --confirmed-by-user", instructions)
         self.assertIn("db delete <item_id> --confirmed-by-user", instructions)
+        self.assertIn("unsafe_paths", instructions)
+        self.assertIn("file_cleanup_skipped", instructions)
 
     def test_schema_documents_attachment_import_fields(self):
         schema = (ROOT / "references" / "schema.md").read_text(encoding="utf-8")

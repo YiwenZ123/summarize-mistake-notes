@@ -208,6 +208,11 @@ metadata changes or deletion after explicit user authorization:
 
 Use `db attachment-audit` to report missing, modified, orphaned, or uncleaned
 managed files. Only use its cleanup flags after explicit user authorization.
+If an audit reports `unsafe_paths`, do not open, render, move, or delete those
+linked files through the skill. After explicit authorization, `db detach` or
+`db delete` may remove the database association and return
+`file_cleanup_skipped`; the external linked file remains for the user to
+handle directly.
 
 ## Search Questions
 

@@ -133,10 +133,14 @@ This keeps normal operation portable and ensures isolated tests that use only
 - `stored_relative_path` uses forward-slash relative paths such as
   `attachments/7beee78033/example-4-2-<sha256>.png`.
 - It must not be absolute or contain `..`.
-- Before reading or deleting a managed file, resolve the path and assert that
-  it remains beneath `<notes_root>/attachments/`.
-- A path resolving through a symbolic link outside the attachment directory is
-  invalid and must not be deleted.
+- Before creating, reading, moving, or deleting a managed file, reject any
+  existing symbolic link or Windows junction in `attachments/`, its question
+  directory, or the target parent chain.
+- A path resolving through a symbolic link or junction is reported by audit as
+  `unsafe_paths`; it must not be opened, rendered, moved, or deleted.
+- After explicit authorization, detach or question deletion may remove the
+  database association for an unsafe attachment and report
+  `file_cleanup_skipped`, leaving the external file untouched.
 - `original_filename` is metadata only and is never used as a filesystem path.
 
 ## Database Schema
@@ -179,7 +183,7 @@ The stored filename uses the complete SHA-256 digest rather than a truncated
 prefix, preventing two distinct files with a shared short prefix from mapping
 to the same destination name.
 
-Before any image is copied:
+For `db validate`, inspect the supplied source without writing files:
 
 1. Confirm the source path exists and resolves to a regular readable file.
 2. Reject a source file larger than 25 MiB.
@@ -187,10 +191,14 @@ Before any image is copied:
    available in the bundled runtime.
 4. Reject decompression-bomb warnings or errors and any decoded format outside
    PNG, JPEG, or WebP.
-5. Compute the SHA-256 digest from the original verified file bytes.
+5. Compute the SHA-256 digest from the verified source bytes.
 
-This prevents renamed non-image files and obviously unsafe or corrupt inputs
-from entering the managed attachment store.
+For `db add` and `db attach`, validation is performed again on an immutable
+working snapshot: stream-copy the source into a bounded temporary managed
+file while hashing it, reject more than 25 MiB during copying, verify that
+temporary file with Pillow, and install only that verified snapshot. This
+prevents a source replacement between validation and copying from entering
+the managed attachment store.
 
 ## Import JSON Interface
 
@@ -272,9 +280,10 @@ Rules:
 - `db delete` now requires explicit confirmation because deletion can remove
   managed files as well as database records and review events.
 - `db attachment-audit` reports missing managed files, unmanaged orphan files,
-  modified-content digest mismatches, and leftover trash. It is read-only
-  unless at least one cleanup flag and the single `--confirmed-by-user` switch
-  are both provided.
+  modified-content digest mismatches, leftover trash, and unsafe linked paths.
+  It is read-only unless at least one cleanup flag and the single
+  `--confirmed-by-user` switch are both provided; unsafe paths are never
+  followed for cleanup.
 
 The skill instructions must be updated so Codex requests explicit user
 selection before adding question attachments and explicit authorization before
@@ -289,13 +298,16 @@ attachment row that points to a file it has not yet created.
 For `db add` and `db attach`:
 
 1. Resolve the storage context.
-2. Validate all input fields and all source images before making any database
-   or managed-file change.
-3. Start one SQLite transaction for the complete command.
-4. Determine which attachments are new by SHA-256 and existing question ID.
-5. For every new attachment, copy to a unique temporary file inside its final
-   `attachments/<question_id>/` directory, then atomically replace it into
-   its final canonical filename. Track every file newly created by this
+2. Validate input fields and preflight source images before making any
+   managed-file change.
+3. Start one `BEGIN IMMEDIATE` SQLite transaction for the complete command so
+   concurrent attachment writes are serialized.
+4. For every requested attachment, stream-copy to a unique temporary file
+   inside its validated `attachments/<question_id>/` directory, enforcing the
+   size limit and computing the digest while copying.
+5. Verify that snapshot with Pillow, determine whether it is already linked
+   by SHA-256 and question ID, then atomically install only new verified files
+   at their canonical filenames. Track every final file newly created by this
    command.
 6. Insert or update question rows and insert attachment rows within the same
    SQLite transaction.

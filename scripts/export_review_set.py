@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -17,6 +18,7 @@ from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from PIL import Image, UnidentifiedImageError
 
@@ -51,6 +53,7 @@ ATTACHMENT_MEDIA_TYPES = {
     "WEBP": ("image/webp", ".webp"),
 }
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+HASH_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -191,17 +194,26 @@ def normalize_collection_type(value: Any) -> str:
     return LEGACY_COLLECTION_TYPE_ALIASES.get(raw, "")
 
 
-def verify_source_image(source_path: str) -> dict[str, Any]:
-    source = Path(source_path).expanduser().resolve()
-    if not source.exists() or not source.is_file():
-        raise ValueError(f"Attachment source is not a readable file: {source}")
-    byte_size = source.stat().st_size
-    if byte_size > MAX_ATTACHMENT_BYTES:
-        raise ValueError(f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {source}")
+def file_digest_and_size(path: Path, *, enforce_limit: bool = False) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_size = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(HASH_CHUNK_SIZE)
+            if not chunk:
+                break
+            byte_size += len(chunk)
+            if enforce_limit and byte_size > MAX_ATTACHMENT_BYTES:
+                raise ValueError(f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {path}")
+            digest.update(chunk)
+    return digest.hexdigest(), byte_size
+
+
+def verified_image_type(path: Path) -> tuple[str, str]:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(source) as image:
+            with Image.open(path) as image:
                 image.verify()
                 image_format = str(image.format or "").upper()
     except (
@@ -210,11 +222,18 @@ def verify_source_image(source_path: str) -> dict[str, Any]:
         Image.DecompressionBombWarning,
         Image.DecompressionBombError,
     ) as exc:
-        raise ValueError(f"Attachment is not a valid image: {source}") from exc
+        raise ValueError(f"Attachment is not a valid image: {path}") from exc
     if image_format not in ATTACHMENT_MEDIA_TYPES:
         raise ValueError(f"Unsupported attachment image format: {image_format}")
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    media_type, extension = ATTACHMENT_MEDIA_TYPES[image_format]
+    return ATTACHMENT_MEDIA_TYPES[image_format]
+
+
+def verify_source_image(source_path: str) -> dict[str, Any]:
+    source = Path(source_path).expanduser().resolve()
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"Attachment source is not a readable file: {source}")
+    digest, byte_size = file_digest_and_size(source, enforce_limit=True)
+    media_type, extension = verified_image_type(source)
     return {
         "source": source,
         "sha256": digest,
@@ -224,7 +243,7 @@ def verify_source_image(source_path: str) -> dict[str, Any]:
     }
 
 
-def validated_attachment_input(raw_attachment: dict[str, Any]) -> dict[str, Any]:
+def validated_attachment_request(raw_attachment: dict[str, Any]) -> dict[str, Any]:
     role = str(raw_attachment.get("role", "")).strip()
     provenance = str(raw_attachment.get("provenance", "")).strip()
     caption = str(raw_attachment.get("caption", "")).strip()
@@ -234,15 +253,18 @@ def validated_attachment_input(raw_attachment: dict[str, Any]) -> dict[str, Any]
         raise ValueError("Attachment provenance must be provided or reconstructed.")
     if not caption:
         raise ValueError("Attachment caption is required.")
-    verified = verify_source_image(str(raw_attachment.get("source_path", "")).strip())
+    source = Path(str(raw_attachment.get("source_path", "")).strip()).expanduser().resolve()
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"Attachment source is not a readable file: {source}")
+    if source.stat().st_size > MAX_ATTACHMENT_BYTES:
+        raise ValueError(f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {source}")
     return {
-        **verified,
+        "source": source,
         "role": role,
         "provenance": provenance,
         "caption": caption,
-        "original_filename": verified["source"].name,
+        "original_filename": source.name,
     }
-
 
 def validate_review_data(data: dict[str, Any]) -> None:
     errors: list[str] = []
@@ -522,55 +544,185 @@ def get_or_create_course(connection: sqlite3.Connection, course: str) -> int:
     return int(row["id"])
 
 
+def linked_directory(path: Path) -> bool:
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def unsafe_managed_path(path: Path) -> ValueError:
+    return ValueError(
+        f"Unsafe managed attachment path: {path}. Run db attachment-audit before continuing."
+    )
+
+
+def ensure_safe_managed_directory(
+    context: StorageContext,
+    relative_parts: tuple[str, ...] = (),
+    *,
+    create: bool = False,
+) -> Path:
+    if create:
+        context.notes_root.mkdir(parents=True, exist_ok=True)
+    if context.notes_root.exists() and not context.notes_root.is_dir():
+        raise unsafe_managed_path(context.notes_root)
+    current = context.notes_root
+    for index, part in enumerate(("attachments", *relative_parts)):
+        current = current / part
+        if linked_directory(current):
+            raise unsafe_managed_path(current)
+        if current.exists():
+            if not current.is_dir():
+                raise unsafe_managed_path(current)
+        elif create:
+            current.mkdir()
+            if linked_directory(current) or not current.is_dir():
+                raise unsafe_managed_path(current)
+        else:
+            remaining = ("attachments", *relative_parts)[index + 1 :]
+            return current.joinpath(*remaining)
+    return current
+
+
+def managed_attachment_path(
+    context: StorageContext,
+    relative: str,
+    *,
+    create_parent: bool = False,
+) -> Path:
+    relative_path = Path(relative)
+    parts = relative_path.parts
+    if (
+        relative_path.is_absolute()
+        or ".." in parts
+        or len(parts) < 3
+        or parts[0] != "attachments"
+    ):
+        raise unsafe_managed_path(context.notes_root / relative_path)
+    parent = ensure_safe_managed_directory(
+        context, tuple(parts[1:-1]), create=create_parent
+    )
+    managed_path = parent / parts[-1]
+    if linked_directory(managed_path) or (managed_path.exists() and not managed_path.is_file()):
+        raise unsafe_managed_path(managed_path)
+    return managed_path
+
+
 def attachment_destination(
     context: StorageContext,
     question_id: str,
     attachment: dict[str, Any],
 ) -> tuple[Path, str]:
+    question_component = Path(question_id)
+    if (
+        question_component.is_absolute()
+        or len(question_component.parts) != 1
+        or question_component.parts[0] in {".", ".."}
+    ):
+        raise unsafe_managed_path(context.attachments_root / question_component)
     stem = clean_filename(attachment["source"].stem, "image", 60)
     relative_path = (
         Path("attachments")
         / question_id
         / f"{stem}-{attachment['sha256']}{attachment['extension']}"
     )
-    return context.notes_root / relative_path, relative_path.as_posix()
+    return (
+        managed_attachment_path(context, relative_path.as_posix(), create_parent=True),
+        relative_path.as_posix(),
+    )
 
 
-def copy_managed_attachment(
+def create_verified_snapshot(
+    context: StorageContext,
+    question_id: str,
+    raw_attachment: dict[str, Any],
+) -> tuple[dict[str, Any], Path]:
+    attachment = validated_attachment_request(raw_attachment)
+    question_component = Path(question_id)
+    if (
+        question_component.is_absolute()
+        or len(question_component.parts) != 1
+        or question_component.parts[0] in {".", ".."}
+    ):
+        raise unsafe_managed_path(context.attachments_root / question_component)
+    question_dir = ensure_safe_managed_directory(context, (question_id,), create=True)
+    temporary = question_dir / f".incoming-{uuid.uuid4().hex}.tmp"
+    try:
+        digest = hashlib.sha256()
+        byte_size = 0
+        with attachment["source"].open("rb") as source, temporary.open("xb") as destination:
+            while True:
+                chunk = source.read(HASH_CHUNK_SIZE)
+                if not chunk:
+                    break
+                byte_size += len(chunk)
+                if byte_size > MAX_ATTACHMENT_BYTES:
+                    raise ValueError(
+                        f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {attachment['source']}"
+                    )
+                destination.write(chunk)
+                digest.update(chunk)
+        media_type, extension = verified_image_type(temporary)
+        return (
+            {
+                **attachment,
+                "sha256": digest.hexdigest(),
+                "byte_size": byte_size,
+                "media_type": media_type,
+                "extension": extension,
+            },
+            temporary,
+        )
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        try:
+            question_dir.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def file_matches_attachment(path: Path, attachment: dict[str, Any]) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    current_size = path.stat().st_size
+    if current_size != int(attachment["byte_size"]) or current_size > MAX_ATTACHMENT_BYTES:
+        return False
+    digest, _ = file_digest_and_size(path, enforce_limit=True)
+    return digest == attachment["sha256"]
+
+
+def install_verified_snapshot(
     context: StorageContext,
     question_id: str,
     attachment: dict[str, Any],
+    temporary: Path,
     created_files: list[Path],
 ) -> str:
     final_path, relative_path = attachment_destination(context, question_id, attachment)
     if final_path.exists():
-        digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
-        if digest != attachment["sha256"]:
+        if not file_matches_attachment(final_path, attachment):
             raise ValueError(
                 f"Existing managed attachment differs from verified source digest: {final_path}"
             )
         return relative_path
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        shutil.copyfile(attachment["source"], temporary)
-        copied_digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
-        if copied_digest != attachment["sha256"]:
-            raise ValueError(f"Attachment source changed while copying: {attachment['source']}")
-        temporary.replace(final_path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    temporary.replace(final_path)
     created_files.append(final_path)
     return relative_path
 
 
 def cleanup_created_attachment_files(created_files: list[Path], context: StorageContext) -> None:
     for path in reversed(created_files):
-        if path.exists():
-            path.unlink()
-        parent = path.parent
+        try:
+            relative = path.relative_to(context.notes_root).as_posix()
+            safe_path = managed_attachment_path(context, relative)
+        except ValueError:
+            continue
+        if safe_path.exists():
+            safe_path.unlink()
+        parent = safe_path.parent
         while parent != context.attachments_root.parent and parent.exists():
+            if linked_directory(parent):
+                break
             try:
                 parent.rmdir()
             except OSError:
@@ -587,75 +739,90 @@ def add_attachment_row(
     raw_attachment: dict[str, Any],
     created_files: list[Path],
 ) -> sqlite3.Row:
-    attachment = validated_attachment_input(raw_attachment)
-    existing = connection.execute(
-        "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
-        (question_id, attachment["sha256"]),
-    ).fetchone()
-    if existing is not None:
-        if (
-            existing["role"] != attachment["role"]
-            or existing["provenance"] != attachment["provenance"]
-            or existing["caption"] != attachment["caption"]
-        ):
-            raise ValueError(
-                "Attachment bytes are already linked with different metadata; "
-                "use db attachment-update after explicit user confirmation."
-            )
-        return existing
-    relative_path = copy_managed_attachment(context, question_id, attachment, created_files)
-    connection.execute(
-        """
-        INSERT INTO question_attachments (
-            question_id, role, provenance, stored_relative_path, original_filename,
-            caption, sha256, media_type, byte_size, created_at
+    attachment, temporary = create_verified_snapshot(context, question_id, raw_attachment)
+    try:
+        existing = connection.execute(
+            "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
+            (question_id, attachment["sha256"]),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["role"] != attachment["role"]
+                or existing["provenance"] != attachment["provenance"]
+                or existing["caption"] != attachment["caption"]
+            ):
+                raise ValueError(
+                    "Attachment bytes are already linked with different metadata; "
+                    "use db attachment-update after explicit user confirmation."
+                )
+            return existing
+        relative_path = install_verified_snapshot(
+            context, question_id, attachment, temporary, created_files
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            question_id,
-            attachment["role"],
-            attachment["provenance"],
-            relative_path,
-            attachment["original_filename"],
-            attachment["caption"],
-            attachment["sha256"],
-            attachment["media_type"],
-            attachment["byte_size"],
-            now_iso(),
-        ),
-    )
-    return connection.execute(
-        "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
-        (question_id, attachment["sha256"]),
-    ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO question_attachments (
+                question_id, role, provenance, stored_relative_path, original_filename,
+                caption, sha256, media_type, byte_size, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                question_id,
+                attachment["role"],
+                attachment["provenance"],
+                relative_path,
+                attachment["original_filename"],
+                attachment["caption"],
+                attachment["sha256"],
+                attachment["media_type"],
+                attachment["byte_size"],
+                now_iso(),
+            ),
+        )
+        return connection.execute(
+            "SELECT * FROM question_attachments WHERE question_id = ? AND sha256 = ?",
+            (question_id, attachment["sha256"]),
+        ).fetchone()
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
-def managed_attachment_path(context: StorageContext, relative: str) -> Path:
-    relative_path = Path(relative)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        raise ValueError(f"Unsafe managed attachment path: {relative}")
-    attachments_root = context.attachments_root.resolve()
-    managed_path = (context.notes_root / relative_path).resolve()
-    if managed_path != attachments_root and attachments_root not in managed_path.parents:
-        raise ValueError(f"Managed attachment escapes attachments root: {relative}")
-    return managed_path
-
-
-def serialize_attachment(row: sqlite3.Row, context: StorageContext) -> dict[str, Any]:
-    managed_path = managed_attachment_path(context, row["stored_relative_path"])
+def attachment_metadata(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "role": row["role"],
         "provenance": row["provenance"],
         "caption": row["caption"],
         "stored_relative_path": row["stored_relative_path"],
-        "managed_path": str(managed_path),
         "media_type": row["media_type"],
         "byte_size": row["byte_size"],
         "sha256": row["sha256"],
+    }
+
+
+def serialize_attachment(row: sqlite3.Row, context: StorageContext) -> dict[str, Any]:
+    managed_path = managed_attachment_path(context, row["stored_relative_path"])
+    return {
+        **attachment_metadata(row),
+        "managed_path": str(managed_path),
         "missing": not managed_path.exists(),
     }
+
+
+def serialize_attachment_for_cleanup(
+    row: sqlite3.Row, context: StorageContext
+) -> tuple[dict[str, Any], Path | None]:
+    try:
+        attachment = serialize_attachment(row, context)
+        return attachment, Path(attachment["managed_path"])
+    except ValueError as exc:
+        return {
+            **attachment_metadata(row),
+            "unsafe_path": True,
+            "path_error": str(exc),
+        }, None
 
 
 def load_attachments(
@@ -701,7 +868,11 @@ def verify_managed_attachment(attachment: dict[str, Any]) -> None:
     managed_path = Path(attachment["managed_path"])
     if not managed_path.exists():
         raise ValueError(f"Managed attachment is missing: {managed_path}")
-    digest = hashlib.sha256(managed_path.read_bytes()).hexdigest()
+    if managed_path.stat().st_size != int(attachment["byte_size"]):
+        raise ValueError(f"Managed attachment size differs from stored size: {managed_path}")
+    if managed_path.stat().st_size > MAX_ATTACHMENT_BYTES:
+        raise ValueError(f"Managed attachment size differs from stored size: {managed_path}")
+    digest, _ = file_digest_and_size(managed_path, enforce_limit=True)
     if digest != attachment["sha256"]:
         raise ValueError(f"Managed attachment differs from stored digest: {managed_path}")
 
@@ -710,30 +881,43 @@ def stage_managed_files(
     context: StorageContext,
     paths: list[Path],
 ) -> tuple[Path | None, list[tuple[Path, Path]]]:
-    existing_paths = [path for path in paths if path.exists()]
+    existing_paths: list[Path] = []
+    for path in paths:
+        relative = path.relative_to(context.notes_root).as_posix()
+        safe_path = managed_attachment_path(context, relative)
+        if safe_path.exists():
+            existing_paths.append(safe_path)
     if not existing_paths:
         return None, []
-    trash_root = context.attachments_root / ".trash" / uuid.uuid4().hex
+    operation_id = uuid.uuid4().hex
+    trash_root = ensure_safe_managed_directory(context, (".trash", operation_id), create=True)
     moves: list[tuple[Path, Path]] = []
     try:
         for source in existing_paths:
-            destination = trash_root / source.relative_to(context.attachments_root)
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination_relative = (
+                Path("attachments") / ".trash" / operation_id / source.relative_to(context.attachments_root)
+            )
+            destination = managed_attachment_path(
+                context, destination_relative.as_posix(), create_parent=True
+            )
             source.replace(destination)
             moves.append((source, destination))
     except OSError:
-        restore_staged_files(moves)
+        restore_staged_files(context, moves)
         if trash_root.exists():
             shutil.rmtree(trash_root, ignore_errors=True)
         raise
     return trash_root, moves
 
 
-def restore_staged_files(moves: list[tuple[Path, Path]]) -> None:
+def restore_staged_files(context: StorageContext, moves: list[tuple[Path, Path]]) -> None:
     for original, staged in reversed(moves):
-        if staged.exists():
-            original.parent.mkdir(parents=True, exist_ok=True)
-            staged.replace(original)
+        original_relative = original.relative_to(context.notes_root).as_posix()
+        staged_relative = staged.relative_to(context.notes_root).as_posix()
+        safe_original = managed_attachment_path(context, original_relative, create_parent=True)
+        safe_staged = managed_attachment_path(context, staged_relative)
+        if safe_staged.exists():
+            safe_staged.replace(safe_original)
 
 
 def finalize_trash_cleanup(trash_root: Path | None) -> str | None:
@@ -755,6 +939,8 @@ def remove_empty_question_dirs(context: StorageContext, managed_paths: list[Path
         if parent == context.attachments_root or not parent.exists():
             continue
         try:
+            if linked_directory(parent):
+                continue
             parent.rmdir()
         except OSError:
             pass
@@ -895,13 +1081,13 @@ def render_question_content(item: dict[str, Any]) -> str:
 
 def render_markdown_attachment(attachment: dict[str, Any]) -> str:
     caption = (
-        attachment["caption"]
+        re.sub(r"\s+", " ", attachment["caption"]).strip()
         .replace("\\", r"\\")
         .replace("[", r"\[")
         .replace("]", r"\]")
     )
     relative_path = (Path("..") / Path(attachment["stored_relative_path"])).as_posix()
-    return f"![{caption}]({relative_path})"
+    return f"![{caption}]({quote(relative_path, safe='/')})"
 
 
 def render_db_question_export(
@@ -1095,6 +1281,7 @@ def db_add(args: argparse.Namespace) -> int:
         db_path = context.db_path
         with connect_db(db_path) as connection:
             try:
+                connection.execute("BEGIN IMMEDIATE")
                 inserted, updated, ids = insert_questions(
                     connection, data, export_date, context, created_files
                 )
@@ -1194,10 +1381,12 @@ def db_search(args: argparse.Namespace) -> int:
 def db_attach(args: argparse.Namespace) -> int:
     created_files: list[Path] = []
     context: StorageContext | None = None
+    committed = False
     try:
         context = resolve_storage_context(args.config, args.db_path, args.notes_root)
         with connect_db(context.db_path) as connection:
             try:
+                connection.execute("BEGIN IMMEDIATE")
                 question = connection.execute(
                     "SELECT id FROM questions WHERE id = ?", (args.item_id,)
                 ).fetchone()
@@ -1216,11 +1405,12 @@ def db_attach(args: argparse.Namespace) -> int:
                     created_files,
                 )
                 connection.commit()
+                committed = True
             except Exception:
                 connection.rollback()
                 raise
     except (RuntimeError, ValueError, sqlite3.Error, OSError) as exc:
-        if context is not None:
+        if context is not None and not committed:
             cleanup_created_attachment_files(created_files, context)
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
@@ -1284,6 +1474,7 @@ def db_detach(args: argparse.Namespace) -> int:
     trash_root: Path | None = None
     moves: list[tuple[Path, Path]] = []
     managed_paths: list[Path] = []
+    file_cleanup_skipped: list[dict[str, Any]] = []
     try:
         if not args.confirmed_by_user:
             raise ValueError(
@@ -1297,8 +1488,11 @@ def db_detach(args: argparse.Namespace) -> int:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Attachment not found: {args.attachment_id}")
-            attachment = serialize_attachment(row, context)
-            managed_paths = [Path(attachment["managed_path"])]
+            attachment, managed_path = serialize_attachment_for_cleanup(row, context)
+            if managed_path is None:
+                file_cleanup_skipped.append(attachment)
+            else:
+                managed_paths = [managed_path]
             trash_root, moves = stage_managed_files(context, managed_paths)
             try:
                 connection.execute(
@@ -1307,7 +1501,7 @@ def db_detach(args: argparse.Namespace) -> int:
                 connection.commit()
             except Exception:
                 connection.rollback()
-                restore_staged_files(moves)
+                restore_staged_files(context, moves)
                 raise
         cleanup_warning = finalize_trash_cleanup(trash_root)
         remove_empty_question_dirs(context, managed_paths)
@@ -1317,6 +1511,8 @@ def db_detach(args: argparse.Namespace) -> int:
     result = {"db_path": str(context.db_path), "detached_attachment": attachment}
     if cleanup_warning:
         result["cleanup_warning"] = cleanup_warning
+    if file_cleanup_skipped:
+        result["file_cleanup_skipped"] = file_cleanup_skipped
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -1336,30 +1532,78 @@ def db_attachment_audit(args: argparse.Namespace) -> int:
         referenced: set[Path] = set()
         missing_files: list[dict[str, Any]] = []
         modified_files: list[dict[str, Any]] = []
+        unsafe_paths: list[dict[str, Any]] = []
         for row in rows:
-            attachment = serialize_attachment(row, context)
+            try:
+                attachment = serialize_attachment(row, context)
+            except ValueError as exc:
+                unsafe_paths.append({**attachment_metadata(row), "path_error": str(exc)})
+                continue
             path = Path(attachment["managed_path"])
             referenced.add(path)
             if attachment["missing"]:
                 missing_files.append(attachment)
-            elif hashlib.sha256(path.read_bytes()).hexdigest() != attachment["sha256"]:
-                modified_files.append(attachment)
+            else:
+                try:
+                    verify_managed_attachment(attachment)
+                except ValueError:
+                    modified_files.append(attachment)
         orphan_paths: list[Path] = []
         trash_paths: list[Path] = []
-        if context.attachments_root.exists():
-            for path in context.attachments_root.rglob("*"):
-                if not path.is_file():
-                    continue
-                relative_parts = path.relative_to(context.attachments_root).parts
-                if relative_parts and relative_parts[0] == ".trash":
-                    trash_paths.append(path)
-                elif path.resolve() not in referenced:
-                    orphan_paths.append(path)
+        try:
+            attachments_root = ensure_safe_managed_directory(context)
+        except ValueError as exc:
+            unsafe_paths.append(
+                {"stored_relative_path": "attachments", "path_error": str(exc)}
+            )
+            attachments_root = None
+        if attachments_root is not None and attachments_root.exists():
+            for current_root, directory_names, file_names in os.walk(
+                attachments_root, topdown=True, followlinks=False
+            ):
+                current = Path(current_root)
+                for name in list(directory_names):
+                    directory = current / name
+                    if linked_directory(directory):
+                        unsafe_paths.append(
+                            {
+                                "stored_relative_path": directory.relative_to(
+                                    context.notes_root
+                                ).as_posix(),
+                                "path_error": str(unsafe_managed_path(directory)),
+                            }
+                        )
+                        directory_names.remove(name)
+                for name in file_names:
+                    path = current / name
+                    if linked_directory(path) or not path.is_file():
+                        unsafe_paths.append(
+                            {
+                                "stored_relative_path": path.relative_to(
+                                    context.notes_root
+                                ).as_posix(),
+                                "path_error": str(unsafe_managed_path(path)),
+                            }
+                        )
+                        continue
+                    relative_parts = path.relative_to(attachments_root).parts
+                    if relative_parts and relative_parts[0] == ".trash":
+                        trash_paths.append(path)
+                    elif path not in referenced:
+                        orphan_paths.append(path)
         if args.prune_orphans:
             for path in orphan_paths:
-                path.unlink()
-        if args.empty_trash and (context.attachments_root / ".trash").exists():
-            shutil.rmtree(context.attachments_root / ".trash")
+                relative = path.relative_to(context.notes_root).as_posix()
+                managed_attachment_path(context, relative).unlink()
+        if args.empty_trash and attachments_root is not None:
+            trash_root = context.attachments_root / ".trash"
+            unsafe_trash = any(
+                str(entry.get("stored_relative_path", "")).startswith("attachments/.trash")
+                for entry in unsafe_paths
+            )
+            if trash_root.exists() and not unsafe_trash:
+                ensure_safe_managed_directory(context, (".trash",))
+                shutil.rmtree(trash_root)
     except (RuntimeError, ValueError, sqlite3.Error, OSError) as exc:
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
@@ -1369,6 +1613,7 @@ def db_attachment_audit(args: argparse.Namespace) -> int:
         "modified_files": modified_files,
         "orphan_files": [str(path) for path in orphan_paths],
         "trash_files": [str(path) for path in trash_paths],
+        "unsafe_paths": unsafe_paths,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1553,6 +1798,7 @@ def db_delete(args: argparse.Namespace) -> int:
     trash_root: Path | None = None
     moves: list[tuple[Path, Path]] = []
     managed_paths: list[Path] = []
+    file_cleanup_skipped: list[dict[str, Any]] = []
     try:
         if not args.confirmed_by_user:
             raise ValueError(
@@ -1578,8 +1824,14 @@ def db_delete(args: argparse.Namespace) -> int:
                 "SELECT * FROM question_attachments WHERE question_id = ? ORDER BY id",
                 (args.item_id,),
             ).fetchall()
-            attachments = [serialize_attachment(item, context) for item in attachment_rows]
-            managed_paths = [Path(attachment["managed_path"]) for attachment in attachments]
+            attachments: list[dict[str, Any]] = []
+            for attachment_row in attachment_rows:
+                attachment, managed_path = serialize_attachment_for_cleanup(attachment_row, context)
+                attachments.append(attachment)
+                if managed_path is None:
+                    file_cleanup_skipped.append(attachment)
+                else:
+                    managed_paths.append(managed_path)
             if attachments:
                 deleted_item["attachments"] = attachments
             trash_root, moves = stage_managed_files(context, managed_paths)
@@ -1588,7 +1840,7 @@ def db_delete(args: argparse.Namespace) -> int:
                 connection.commit()
             except Exception:
                 connection.rollback()
-                restore_staged_files(moves)
+                restore_staged_files(context, moves)
                 raise
         cleanup_warning = finalize_trash_cleanup(trash_root)
         remove_empty_question_dirs(context, managed_paths)
@@ -1601,6 +1853,8 @@ def db_delete(args: argparse.Namespace) -> int:
     }
     if cleanup_warning:
         result["cleanup_warning"] = cleanup_warning
+    if file_cleanup_skipped:
+        result["file_cleanup_skipped"] = file_cleanup_skipped
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
