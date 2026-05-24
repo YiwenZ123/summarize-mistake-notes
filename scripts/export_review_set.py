@@ -623,8 +623,19 @@ def add_attachment_row(
     ).fetchone()
 
 
+def managed_attachment_path(context: StorageContext, relative: str) -> Path:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError(f"Unsafe managed attachment path: {relative}")
+    attachments_root = context.attachments_root.resolve()
+    managed_path = (context.notes_root / relative_path).resolve()
+    if managed_path != attachments_root and attachments_root not in managed_path.parents:
+        raise ValueError(f"Managed attachment escapes attachments root: {relative}")
+    return managed_path
+
+
 def serialize_attachment(row: sqlite3.Row, context: StorageContext) -> dict[str, Any]:
-    managed_path = context.notes_root / Path(row["stored_relative_path"])
+    managed_path = managed_attachment_path(context, row["stored_relative_path"])
     return {
         "id": row["id"],
         "role": row["role"],
@@ -634,6 +645,7 @@ def serialize_attachment(row: sqlite3.Row, context: StorageContext) -> dict[str,
         "managed_path": str(managed_path),
         "media_type": row["media_type"],
         "byte_size": row["byte_size"],
+        "sha256": row["sha256"],
         "missing": not managed_path.exists(),
     }
 
@@ -675,6 +687,15 @@ def add_attachments_to_items(
         attachments = attachment_map.get(item["id"], [])
         if attachments:
             item["attachments"] = attachments
+
+
+def verify_managed_attachment(attachment: dict[str, Any]) -> None:
+    managed_path = Path(attachment["managed_path"])
+    if not managed_path.exists():
+        raise ValueError(f"Managed attachment is missing: {managed_path}")
+    digest = hashlib.sha256(managed_path.read_bytes()).hexdigest()
+    if digest != attachment["sha256"]:
+        raise ValueError(f"Managed attachment differs from stored digest: {managed_path}")
 
 
 def normalize_question_for_db(
@@ -760,14 +781,32 @@ def row_to_quiz_prompt(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def render_question_content(item: dict[str, Any]) -> str:
-    return "\n".join(
+    lines = [
+        f"Course: {item['course']}",
+        f"Topic: {item['topic']}",
+        f"Title: {item['title']}",
+        "",
+        "Original question:",
+        item["original_question"],
+    ]
+    prompt_attachments = [
+        attachment
+        for attachment in item.get("attachments", [])
+        if attachment["role"] == "prompt"
+    ]
+    solution_attachments = [
+        attachment
+        for attachment in item.get("attachments", [])
+        if attachment["role"] == "solution"
+    ]
+    if prompt_attachments:
+        lines.extend(["", "Prompt images:"])
+        lines.extend(
+            f"- {attachment['caption']}: {attachment['managed_path']}"
+            for attachment in prompt_attachments
+        )
+    lines.extend(
         [
-            f"Course: {item['course']}",
-            f"Topic: {item['topic']}",
-            f"Title: {item['title']}",
-            "",
-            "Original question:",
-            item["original_question"],
             "",
             "Knowledge points:",
             format_list(item["knowledge_points"]),
@@ -780,11 +819,27 @@ def render_question_content(item: dict[str, Any]) -> str:
             "",
             "Answer points:",
             format_list(item["answer_points"]),
-            "",
-            "Review suggestion:",
-            item["review_suggestion"],
         ]
     )
+    if solution_attachments:
+        lines.extend(["", "Solution images:"])
+        lines.extend(
+            f"- {attachment['caption']}: {attachment['managed_path']}"
+            for attachment in solution_attachments
+        )
+    lines.extend(["", "Review suggestion:", item["review_suggestion"]])
+    return "\n".join(lines)
+
+
+def render_markdown_attachment(attachment: dict[str, Any]) -> str:
+    caption = (
+        attachment["caption"]
+        .replace("\\", r"\\")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+    )
+    relative_path = (Path("..") / Path(attachment["stored_relative_path"])).as_posix()
+    return f"![{caption}]({relative_path})"
 
 
 def render_db_question_export(
@@ -799,6 +854,16 @@ def render_db_question_export(
     lines = [f"# {scope}", ""]
 
     for index, item in enumerate(items, start=1):
+        prompt_attachments = [
+            attachment
+            for attachment in item.get("attachments", [])
+            if attachment["role"] == "prompt"
+        ]
+        solution_attachments = [
+            attachment
+            for attachment in item.get("attachments", [])
+            if attachment["role"] == "solution"
+        ]
         lines.extend(
             [
                 f"## {index}. {item['title']}",
@@ -809,6 +874,8 @@ def render_db_question_export(
                 "",
             ]
         )
+        for attachment in prompt_attachments:
+            lines.extend([render_markdown_attachment(attachment), ""])
         if mode == "full":
             lines.extend(
                 [
@@ -818,6 +885,8 @@ def render_db_question_export(
                     "",
                 ]
             )
+            for attachment in solution_attachments:
+                lines.extend([render_markdown_attachment(attachment), ""])
         if index != len(items):
             lines.extend(["---", ""])
     return "\n".join(lines).rstrip() + "\n"
@@ -1026,8 +1095,11 @@ def db_search(args: argparse.Namespace) -> int:
     except (RuntimeError, ValueError, sqlite3.Error) as exc:
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
-    items = [row_to_question(row, args.include_content) for row in rows]
+    items = [row_to_question(row, include_content=False) for row in rows]
     add_attachments_to_items(items, attachment_map)
+    if args.include_content:
+        for item in items:
+            item["content"] = render_question_content(item)
     result = {
         "db_path": str(db_path),
         "returned_count": len(items),
@@ -1092,8 +1164,8 @@ def db_export(args: argparse.Namespace) -> int:
         if not course and not topic:
             raise ValueError("At least one of --course or --topic is required for export.")
         export_date = validate_export_date(args.date or date.today().isoformat())
-        db_path = get_db_path(args.config, args.db_path)
-        notes_root = get_notes_root(args.config, args.notes_root)
+        context = resolve_storage_context(args.config, args.db_path, args.notes_root)
+        db_path = context.db_path
         where: list[str] = []
         params: list[Any] = []
         if course:
@@ -1113,9 +1185,15 @@ def db_export(args: argparse.Namespace) -> int:
                 """,
                 params,
             ).fetchall()
+            attachment_map = load_attachments(connection, context, [row["id"] for row in rows])
         if not rows:
             raise ValueError("No questions matched the export filters.")
         items = [row_to_question(row, include_content=False) for row in rows]
+        add_attachments_to_items(items, attachment_map)
+        for item in items:
+            for attachment in item.get("attachments", []):
+                if args.mode == "full" or attachment["role"] == "prompt":
+                    verify_managed_attachment(attachment)
         markdown_content = render_db_question_export(
             items,
             mode=args.mode,
@@ -1125,7 +1203,7 @@ def db_export(args: argparse.Namespace) -> int:
         )
         scope_parts = [part for part in (course, topic) if part]
         scope_label = "-".join(clean_filename(part, "questions") for part in scope_parts)
-        export_dir = notes_root / "exports"
+        export_dir = context.notes_root / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{export_date}-{scope_label}-{args.mode}.md"
         markdown_path = choose_output_path(export_dir, filename, markdown_content)
@@ -1150,7 +1228,8 @@ def db_quiz(args: argparse.Namespace) -> int:
     try:
         if args.limit < 1:
             raise ValueError("--limit must be at least 1.")
-        db_path = get_db_path(args.config, args.db_path)
+        context = resolve_storage_context(args.config, args.db_path, args.notes_root)
+        db_path = context.db_path
         with connect_db(db_path) as connection:
             sql, params = build_question_query(
                 query=args.query,
@@ -1159,14 +1238,19 @@ def db_quiz(args: argparse.Namespace) -> int:
                 limit=args.limit,
             )
             rows = connection.execute(sql, params).fetchall()
+            attachment_map = load_attachments(
+                connection, context, [row["id"] for row in rows], role="prompt"
+            )
     except (RuntimeError, ValueError, sqlite3.Error) as exc:
         return fail(str(exc), 2 if str(exc).startswith("NOT_CONFIGURED") else 1)
 
+    items = [row_to_quiz_prompt(row) for row in rows]
+    add_attachments_to_items(items, attachment_map)
     result = {
         "db_path": str(db_path),
         "mode": args.db_command,
         "returned_count": len(rows),
-        "items": [row_to_quiz_prompt(row) for row in rows],
+        "items": items,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1516,6 +1600,7 @@ def build_parser() -> argparse.ArgumentParser:
         db_quiz_parser.add_argument("--limit", type=int, default=3)
         db_quiz_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
         db_quiz_parser.add_argument("--db-path", help="Override database path for this run.")
+        db_quiz_parser.add_argument("--notes-root", help="Override managed attachment root for this run.")
 
     db_done_parser = db_subparsers.add_parser(
         "mark-done", help="Mark one question as reviewed."

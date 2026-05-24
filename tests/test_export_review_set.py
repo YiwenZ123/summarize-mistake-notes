@@ -307,6 +307,136 @@ class AttachmentImportTests(unittest.TestCase):
         self.assertEqual("prompt", self.find_item()["attachments"][0]["role"])
 
 
+class AttachmentVisibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "exercise_bank.sqlite3"
+        self.prompt_path = write_image(self.root / "prompt.png")
+        self.solution_path = self.root / "solution.png"
+        Image.new("RGB", (4, 4), color=(100, 120, 140)).save(self.solution_path, format="PNG")
+        input_path = self.root / "visible-images.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "course": "Images",
+                    "collection_type": "mistake_set",
+                    "topic": "Visibility",
+                    "items": [
+                        {
+                            "title": "Prompt and solution",
+                            "original_question": "Interpret the prompt network.",
+                            "knowledge_points": ["Visibility"],
+                            "mistake_reason": "Read the wrong link.",
+                            "correct_approach": "Read the prompt before solving.",
+                            "answer_points": ["The solution uses Link 2."],
+                            "review_suggestion": "Hide solution material until answered.",
+                            "attachments": [
+                                {
+                                    "source_path": str(self.prompt_path),
+                                    "role": "prompt",
+                                    "provenance": "provided",
+                                    "caption": "prompt-network",
+                                },
+                                {
+                                    "source_path": str(self.solution_path),
+                                    "role": "solution",
+                                    "provenance": "provided",
+                                    "caption": "solution-working",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        added = self.run_cli(
+            "db",
+            "add",
+            "--input",
+            str(input_path),
+            "--confirmed-selection-by-user",
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [str(PYTHON), str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def export_content(self, mode):
+        exported = self.run_cli(
+            "db",
+            "export",
+            "--course",
+            "Images",
+            "--mode",
+            mode,
+            "--db-path",
+            str(self.db_path),
+        )
+        self.assertEqual(0, exported.returncode, exported.stderr)
+        return Path(json.loads(exported.stdout)["markdown_path"]).read_text(encoding="utf-8")
+
+    def test_quiz_and_due_return_prompt_attachment_without_solution_attachment(self):
+        for command_name in ("quiz", "due"):
+            result = self.run_cli(
+                "db", command_name, "--course", "Images", "--db-path", str(self.db_path)
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            attachments = json.loads(result.stdout)["items"][0]["attachments"]
+            self.assertEqual(["prompt"], [attachment["role"] for attachment in attachments])
+
+    def test_questions_only_export_includes_prompt_without_solution_image(self):
+        content = self.export_content("questions-only")
+
+        self.assertIn("prompt-network", content)
+        self.assertNotIn("solution-working", content)
+
+    def test_full_export_places_solution_image_after_answer_heading(self):
+        content = self.export_content("full")
+
+        self.assertLess(content.index("prompt-network"), content.index("### 回答"))
+        self.assertGreater(content.index("solution-working"), content.index("### 回答"))
+
+    def test_search_content_renders_both_attachment_roles(self):
+        searched = self.run_cli(
+            "db", "search", "--course", "Images", "--include-content", "--db-path", str(self.db_path)
+        )
+
+        self.assertEqual(0, searched.returncode, searched.stderr)
+        content = json.loads(searched.stdout)["items"][0]["content"]
+        self.assertIn("prompt-network", content)
+        self.assertIn("solution-working", content)
+
+    def test_export_rejects_tampered_managed_image(self):
+        searched = json.loads(
+            self.run_cli("db", "search", "--course", "Images", "--db-path", str(self.db_path)).stdout
+        )
+        solution = next(
+            attachment
+            for attachment in searched["items"][0]["attachments"]
+            if attachment["role"] == "solution"
+        )
+        Path(solution["managed_path"]).write_bytes(b"modified")
+
+        exported = self.run_cli(
+            "db", "export", "--course", "Images", "--mode", "full", "--db-path", str(self.db_path)
+        )
+
+        self.assertNotEqual(0, exported.returncode)
+        self.assertIn("differs from stored digest", exported.stderr)
+
+
 class ExportQuestionsTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
