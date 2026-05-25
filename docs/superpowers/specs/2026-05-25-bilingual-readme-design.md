@@ -58,12 +58,15 @@ Each language version will contain:
 
 - Commands and option names will be taken from the current script and
   `SKILL.md`, not invented for readability.
-- Installation guidance will distinguish repository installation from the
-  current author's machine-specific fixed runtime paths in `SKILL.md`.
+- Installation guidance will use installation-relative placeholders and state
+  that tracked skill files contain no developer-specific runtime or storage
+  location.
 - The README will not imply that the local exercise database or managed user
   images are committed to Git.
-- Examples will use generic locations and example data, not the user's real
-  notes root or stored study materials.
+- Examples will use path placeholders and example data, not a preconfigured
+  notes root or any stored study materials.
+- The README will state that the repository ships with no notes-root setting
+  and that Codex asks for a storage folder on first database-backed use.
 - The README will explain that database writes should go through the script
   and that destructive attachment operations require explicit confirmation.
 

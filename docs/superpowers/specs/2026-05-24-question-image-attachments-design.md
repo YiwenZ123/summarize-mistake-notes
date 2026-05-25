@@ -9,8 +9,8 @@ Extend the SQLite exercise bank so a saved question can retain essential image
 attachments without weakening the current text-only workflow or revealing
 answer material during self-testing.
 
-The first backfill target is the saved transport-planning mistake item:
-`Example 4.2: 仅对 Link 2 收费的 Second-best Pricing`.
+A representative acceptance case is an existing diagram-based question that
+needs its original prompt figure restored for self-testing.
 
 ## Scope
 
@@ -131,7 +131,7 @@ This keeps normal operation portable and ensures isolated tests that use only
 ### Managed Path Rules
 
 - `stored_relative_path` uses forward-slash relative paths such as
-  `attachments/7beee78033/example-4-2-<sha256>.png`.
+  `attachments/<item_id>/question-figure-<sha256>.png`.
 - It must not be absolute or contain `..`.
 - Before creating, reading, moving, or deleting a managed file, reject any
   existing symbolic link or Windows junction in `attachments/`, its question
@@ -209,10 +209,10 @@ attachment uses the following optional field:
 {
   "attachments": [
     {
-      "source_path": "D:\\path\\question-figure.png",
+      "source_path": "<source-image-path>",
       "role": "prompt",
       "provenance": "provided",
-      "caption": "Two-link network in Example 4.2"
+      "caption": "Diagram shown in the question"
     }
   ]
 }
@@ -362,9 +362,9 @@ Attachment metadata returned to callers contains:
   "id": 1,
   "role": "prompt",
   "provenance": "provided",
-  "caption": "Two-link network in Example 4.2",
-  "stored_relative_path": "attachments/7beee78033/example-4-2-<sha256>.png",
-  "managed_path": "D:\\notes\\attachments\\7beee78033\\example-4-2-<sha256>.png",
+  "caption": "Diagram shown in the question",
+  "stored_relative_path": "attachments/<item_id>/question-figure-<sha256>.png",
+  "managed_path": "<notes_root>\\attachments\\<item_id>\\question-figure-<sha256>.png",
   "media_type": "image/png",
   "byte_size": 12345,
   "missing": false
@@ -390,7 +390,7 @@ For Markdown exports:
 - References are relative to `exports/`, for example:
 
   ```markdown
-  ![Two-link network in Example 4.2](../attachments/7beee78033/example-4-2-<sha256>.png)
+  ![Diagram shown in the question](../attachments/<item_id>/question-figure-<sha256>.png)
   ```
 
 - Captions are Markdown image alt text and must be escaped sufficiently to
@@ -412,24 +412,22 @@ For Markdown exports:
 - Markdown export remains a sharing/backup format; SQLite remains the primary
   store for attachments and review state.
 
-## Example 4.2 Backfill
+## Existing Question Backfill
 
-The saved Example 4.2 item needs a prompt figure because the two parallel links
-and the designation of Link 2 as the charged, normally faster route are
-material to the second-best reasoning.
+An already saved diagram-based question may need a prompt figure when its
+visual relationships or labels are material to solving it.
 
 After implementation:
 
-1. Create or obtain a local PNG showing the full question statement, the
-   parallel `i` to `j` links, `C1 = 10 + 2v1`, `C2 = 5 + v2`, and total
-   demand of 8 trips.
+1. Obtain a readable local image containing the material visual information
+   needed for the stored question.
 2. Use `--provenance provided` when copying an available source image. If the
    image is recreated from supplied content, use `--provenance reconstructed`
    and a caption that states it is reconstructed.
 3. Attach a copied source image with:
 
    ```text
-   db attach 7beee78033 --source "<path>" --role prompt --provenance provided --caption "Two-link network in Example 4.2"
+   db attach <item_id> --source "<source-image-path>" --role prompt --provenance provided --caption "Diagram shown in the question"
    ```
 
 4. Verify that `db quiz` exposes the prompt image, `questions-only` export
@@ -537,5 +535,5 @@ The feature is complete when:
   authorization;
 - moved database directories, local tests, exports, and destructive commands
   all resolve the same managed attachment root;
-- Example 4.2 can be backfilled with a prompt image and successfully reviewed
+- An existing diagram-based question can be backfilled with a prompt image and successfully reviewed
   through quiz and export flows.

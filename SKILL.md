@@ -11,12 +11,12 @@ Use a SQLite exercise bank to store study questions, mistake notes, and review s
 
 ## Guardrails
 
-Use the fixed command paths below. Do not search the current chat directory for this skill, do not try multiple Python launchers before the fixed runtime, and do not narrate skill loading, config checks, script discovery, validation, or Python troubleshooting to the user unless execution is truly blocked.
+Resolve the installed script path and a Python 3 runtime with Pillow from the active Codex environment. Do not store machine-specific absolute paths or a configured notes root in this skill, do not search the current chat directory for the skill, and do not narrate skill loading, config checks, script discovery, validation, or Python troubleshooting to the user unless execution is truly blocked.
 
 ## User-Facing Rules
 
 - The first user-facing sentence must advance the study task itself. Do not say that you are reading the skill, checking scripts, or inspecting config.
-- Run technical checks silently. Mention them only when the save location is missing or a fixed command fails and blocks progress.
+- Run technical checks silently. Mention them only when the save location is missing or a resolved command fails and blocks progress.
 - For add requests, ask for course/topic/collection classification and candidate-item selection in the same confirmation prompt. Show only candidate titles and original questions, not complete answers.
 - Before asking for add confirmation, silently run `<python> <script> db stats --human` and include the returned course list and counts in the same confirmation message. Do not list courses from memory.
 - Do not write any item until the user explicitly selects which numbered candidates to save. Accept explicit responses such as `save 1, 3` or `save all`; classification confirmation alone is not authorization to write.
@@ -112,31 +112,30 @@ When the selected item returned by `db quiz` or `db due` includes attachments, d
 
 ## Command Paths
 
-Use these absolute paths:
+Resolve these placeholders for the installed environment at runtime:
 
 ```text
-<script> = C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py
+<script> = <installed-skill-directory>\scripts\export_review_set.py
+<python> = <python-3-runtime-with-pillow>
 ```
 
-On Windows, always use the fixed Python runtime. Do not try system `python` or `py` first:
-
-```text
-<python> = C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
-```
-
-During normal review, do not describe environment troubleshooting to the user. Only mention a blocker if the fixed command truly fails and there is no way to continue.
+Use a Python 3 runtime known to provide Pillow. Never replace the placeholders
+in the tracked skill with a developer-specific absolute path or notes-root
+value. During normal review, do not describe environment troubleshooting to
+the user. Only mention a blocker if the resolved command truly fails and
+there is no way to continue.
 
 ## Storage Setup
 
-Check the configured save location only when the task actually needs database access; never make this the first user-facing reply.
+No notes root is preconfigured by this skill or repository. Check the configured save location only when the task actually needs database access; never make this the first user-facing reply.
 
-1. Silently check the fixed save location:
+1. Silently check the configured save location:
    ```powershell
    <python> <script> config get
    ```
 2. If not configured, ask only:
    ```text
-   The exercise bank does not have a fixed save location yet. Which folder should store the exercise database? Please provide a folder path.
+   The exercise bank does not have a configured save location yet. Which folder should store the exercise database? Please provide a folder path.
    ```
 3. Save the location:
    ```powershell
@@ -332,7 +331,7 @@ New notes, searches, review prompts, and completion state must use SQLite `db` c
 - Showing complete answers before the user selects which items to save.
 - Narrating internal steps such as reading the skill, checking config, finding scripts, or switching Python.
 - Continuing after PowerShell shows mojibake. Re-read with `Get-Content -Encoding UTF8`.
-- Trying system `python` or `py` before the fixed Python runtime.
+- Using a Python runtime without Pillow or committing an environment-specific runtime path into the skill.
 - Searching Markdown files instead of using `db search`.
 - Quizzing with `db pending --include-content`; use `db quiz` or `db due` instead.
 - Omitting an available `prompt` attachment when displaying a quiz question returned by `db quiz` or `db due`.
