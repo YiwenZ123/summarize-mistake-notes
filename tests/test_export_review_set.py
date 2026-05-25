@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -12,10 +13,12 @@ from pathlib import Path
 from PIL import Image
 
 
-PYTHON = Path(r"C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
+PYTHON = Path(sys.executable)
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "export_review_set.py"
 SKILL = ROOT / "SKILL.md"
+README = ROOT / "README.md"
+README_ZH_CN = ROOT / "README.zh-CN.md"
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
@@ -115,6 +118,27 @@ class AddQuestionSelectionInstructionsTests(unittest.TestCase):
             instructions,
         )
         self.assertIn('db add --input "<prepared-json-file>" --confirmed-selection-by-user', instructions)
+
+
+class PortableDistributionInstructionsTests(unittest.TestCase):
+    def test_public_markdown_does_not_ship_absolute_local_addresses(self):
+        markdown_files = sorted(ROOT.rglob("*.md"))
+
+        for path in markdown_files:
+            content = path.read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"\b[A-Za-z]:\\", content), str(path))
+
+    def test_first_database_use_asks_for_the_storage_folder(self):
+        instructions = SKILL.read_text(encoding="utf-8")
+        readme = README.read_text(encoding="utf-8")
+        readme_zh = README_ZH_CN.read_text(encoding="utf-8")
+
+        self.assertIn("No notes root is preconfigured by this skill or repository.", instructions)
+        self.assertIn("Which folder should store the exercise database?", instructions)
+        self.assertIn("No notes root is shipped or preconfigured with this repository.", readme)
+        self.assertIn("first needs database access", readme)
+        self.assertIn("本仓库不附带或预配置任何笔记根目录。", readme_zh)
+        self.assertIn("首次需要访问数据库时", readme_zh)
 
 
 class AttachmentFoundationTests(unittest.TestCase):

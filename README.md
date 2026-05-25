@@ -43,25 +43,25 @@
 Clone this repository and place the resulting folder in a skill directory recognized by your Codex installation. This repository describes a local skill layout; it does not claim an official installer.
 
 ```powershell
-git clone https://github.com/YiwenZ123/summarize-mistake-notes.git C:\Path\To\CodexSkills\summarize-mistake-notes
+git clone https://github.com/YiwenZ123/summarize-mistake-notes.git <installed-skill-directory>
 
-$Python = "C:\Path\To\Python\python.exe"
-$Script = "C:\Path\To\CodexSkills\summarize-mistake-notes\scripts\export_review_set.py"
+$Python = "<python-3-with-pillow>"
+$Script = "<installed-skill-directory>\scripts\export_review_set.py"
 & $Python $Script --help
 ```
 
-`SKILL.md` contains fixed local script and runtime paths for an installed operating environment. Those paths are environment-specific operational instructions, not a portable installation command; configure `$Python` and `$Script` for your own installation when invoking the CLI directly.
+`SKILL.md` uses installation-relative placeholders rather than a developer's machine paths. Resolve `$Python` and `$Script` in your own installation when invoking the CLI directly.
 
 ## Configure Storage
 
-Choose a private local notes root outside the repository. By default, the database is stored at `<notes_root>\exercise_bank.sqlite3`, managed images at `<notes_root>\attachments\`, and generated Markdown exports at `<notes_root>\exports\`.
+No notes root is shipped or preconfigured with this repository. When Codex first needs database access, it checks the configuration; if no location is set, it asks the learner which private folder should store the exercise database. Once selected, the database is stored at `<notes_root>\exercise_bank.sqlite3`, managed images at `<notes_root>\attachments\`, and generated Markdown exports at `<notes_root>\exports\`.
 
 ```powershell
-$Python = "C:\Path\To\Python\python.exe"
-$Script = "C:\Path\To\CodexSkills\summarize-mistake-notes\scripts\export_review_set.py"
+$Python = "<python-3-with-pillow>"
+$Script = "<installed-skill-directory>\scripts\export_review_set.py"
 
-& $Python $Script config set --notes-root "D:\Study\ReviewNotes"
 & $Python $Script config get
+& $Python $Script config set --notes-root "<folder chosen by the user>"
 ```
 
 Never hand-edit the SQLite database. Create, search, review, export, update, and delete content through the script.
@@ -75,8 +75,8 @@ The examples below assume `$Python` and `$Script` have been defined as shown abo
 Prepare JSON in the format described below. The `--confirmed-selection-by-user` flag must be used only after the learner explicitly selected which candidate items to save. Include an essential image in an import only after the learner explicitly requests or approves it.
 
 ```powershell
-& $Python $Script db validate --input "D:\Study\Imports\review-set.json"
-& $Python $Script db add --input "D:\Study\Imports\review-set.json" --confirmed-selection-by-user
+& $Python $Script db validate --input "<prepared-json-file>"
+& $Python $Script db add --input "<prepared-json-file>" --confirmed-selection-by-user
 ```
 
 ### Inspect And Search
@@ -111,7 +111,7 @@ An export must be scoped by `--course`, `--topic`, or both. Use `full` when answ
 Use an attachment only when an image is essential to understanding or solving the saved question, or when the learner explicitly requests preservation. Attach it only after the learner explicitly requests or approves that image.
 
 ```powershell
-& $Python $Script db attach <item_id> --source "D:\Study\Sources\network.png" --role prompt --provenance provided --caption "Network shown in the question"
+& $Python $Script db attach <item_id> --source "<source-image-path>" --role prompt --provenance provided --caption "Network shown in the question"
 & $Python $Script db attachment-audit
 ```
 
@@ -146,7 +146,7 @@ Imports contain a course, collection type, topic, and one or more complete items
       "review_suggestion": "Re-solve one parallel-link toll example.",
       "attachments": [
         {
-          "source_path": "D:\\Study\\Sources\\network.png",
+          "source_path": "<source-image-path>",
           "role": "prompt",
           "provenance": "provided",
           "caption": "Network shown in the question"
@@ -175,7 +175,7 @@ SQLite stores attachment metadata, including role, provenance, managed relative 
 ## Safety And Privacy
 
 - Keep the notes root, database, exports, and source or managed images local and private unless you intentionally share an export. They are user data, not repository content.
-- Use only generic example files such as `D:\Study\ReviewNotes` and `D:\Study\Sources\network.png` in issues, pull requests, and documentation.
+- Never commit a configured notes root, database path, source-image path, or managed attachment path to this repository; use placeholders in issues, pull requests, and documentation.
 - Saving requires explicit candidate selection before `db add --confirmed-selection-by-user`.
 - Changing attachment visibility through `db attachment-update`, removing an attachment through `db detach`, and removing a question through `db delete` require `--confirmed-by-user` after explicit authorization.
 - If `db attachment-audit` reports `unsafe_paths`, the skill must not open, render, move, or delete the linked files; confirmed detach or deletion may remove only the database association and leave external files for the user to handle.
@@ -185,7 +185,7 @@ SQLite stores attachment metadata, including role, provenance, managed relative 
 From the repository root, use a Python interpreter with the required dependencies:
 
 ```powershell
-$Python = "C:\Path\To\Python\python.exe"
+$Python = "<python-3-with-pillow>"
 
 & $Python -m unittest discover -s tests -v
 & $Python -m py_compile scripts\export_review_set.py tests\test_export_review_set.py

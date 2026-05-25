@@ -103,10 +103,10 @@ Add sections named:
 ## Configure Storage
 ```
 
-Explain repository installation generically, state that the fixed local paths
-inside `SKILL.md` describe the author's installed environment rather than a
-portable install command, and show `config set` / `config get` with generic
-Windows paths.
+Explain repository installation generically, state that tracked instructions
+contain no developer-specific runtime or configured storage address, and show
+`config get` / `config set` with path placeholders. State that first database
+use asks the learner for a storage folder when no notes root is configured.
 
 - [ ] **Step 3: Document user and CLI workflows**
 

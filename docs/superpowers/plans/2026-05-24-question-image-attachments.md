@@ -96,7 +96,7 @@ question fields already used by existing fixtures, with the latter adding:
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentFoundationTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentFoundationTests -v
 ```
 
 Expected: failures because `question_attachments` is not created and
@@ -170,7 +170,7 @@ index. Extend `validate_review_data()` so optional attachment objects require
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentFoundationTests tests.test_export_review_set.AddQuestionSelectionTests tests.test_export_review_set.ExportQuestionsTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentFoundationTests tests.test_export_review_set.AddQuestionSelectionTests tests.test_export_review_set.ExportQuestionsTests -v
 ```
 
 Expected: all selected tests pass and text-only outputs retain the prior
@@ -232,7 +232,7 @@ and for a duplicate whose role conflicts with an existing attachment.
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentImportTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentImportTests -v
 ```
 
 Expected: failures because files are not copied, metadata is not returned, and
@@ -274,7 +274,7 @@ verified-copy/row-insert behavior.
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentImportTests tests.test_export_review_set.AddQuestionSelectionTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentImportTests tests.test_export_review_set.AddQuestionSelectionTests -v
 ```
 
 Expected: all selected tests pass.
@@ -331,7 +331,7 @@ output remains identical to its current expected Markdown.
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentVisibilityTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentVisibilityTests -v
 ```
 
 Expected: failures because output has no role-aware attachment rendering.
@@ -368,7 +368,7 @@ Render prompt images after `### 问题`; render solution images only after
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentVisibilityTests tests.test_export_review_set.ExportQuestionsTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentVisibilityTests tests.test_export_review_set.ExportQuestionsTests -v
 ```
 
 Expected: all selected tests pass.
@@ -433,7 +433,7 @@ class AttachmentMaintenanceTests(unittest.TestCase):
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentMaintenanceTests tests.test_export_review_set.DeleteQuestionTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentMaintenanceTests tests.test_export_review_set.DeleteQuestionTests -v
 ```
 
 Expected: failures because new commands and confirmed file deletion behavior
@@ -481,7 +481,7 @@ confirmation.
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentMaintenanceTests tests.test_export_review_set.DeleteQuestionTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentMaintenanceTests tests.test_export_review_set.DeleteQuestionTests -v
 ```
 
 Expected: all selected tests pass after updating existing delete tests to
@@ -527,7 +527,7 @@ class AttachmentInstructionsTests(unittest.TestCase):
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_export_review_set.AttachmentInstructionsTests -v
+& '<python>' -m unittest tests.test_export_review_set.AttachmentInstructionsTests -v
 ```
 
 Expected: failures because the existing skill and schema reference do not
@@ -540,7 +540,7 @@ In `references/schema.md`, document this optional object:
 ```json
 "attachments": [
   {
-    "source_path": "D:\\path\\diagram.png",
+    "source_path": "<source-image-path>",
     "role": "prompt",
     "provenance": "provided",
     "caption": "Network layout used by the question"
@@ -582,7 +582,7 @@ Update existing deletion command examples to include
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest discover -s tests -v
+& '<python>' -m unittest discover -s tests -v
 ```
 
 Expected: all tests pass with no tracebacks or warnings.
@@ -594,7 +594,7 @@ git add SKILL.md references/schema.md tests/test_export_review_set.py
 git commit -m "docs: describe image attachment study workflow"
 ```
 
-### Task 6: Backfill Example 4.2 And Perform Manual Acceptance Checks
+### Task 6: Backfill An Existing Diagram Question And Perform Manual Acceptance Checks
 
 **Files:**
 - Create only if reconstruction is needed: a local prompt-image asset under the configured notes root before `db attach`
@@ -605,24 +605,24 @@ git commit -m "docs: describe image attachment study workflow"
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db search --query 'Example 4.2' --course '交通规划与建模/Part A' --limit 3 --include-content
+& '<python>' '<script>' db search --query '<question keyword>' --course '<course>' --limit 3 --include-content
 ```
 
-Expected: one matching item with ID `7beee78033` and no prompt attachment, or
-a matching stored ID to use in the following commands if existing data differs.
+Expected: one matching item with an ID to use below and no prompt attachment,
+or a matching stored ID to use in the following commands if existing data differs.
 
 - [ ] **Step 2: Attach the available original figure or an accurately labelled reconstruction**
 
 For a source image available from the user:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db attach 7beee78033 --source '<source-path>' --role prompt --provenance provided --caption 'Two-link network in Example 4.2'
+& '<python>' '<script>' db attach <item_id> --source '<source-path>' --role prompt --provenance provided --caption 'Diagram shown in the question'
 ```
 
 For a locally recreated image based on the known problem statement:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db attach 7beee78033 --source '<reconstructed-path>' --role prompt --provenance reconstructed --caption 'Reconstructed two-link question figure for Example 4.2'
+& '<python>' '<script>' db attach <item_id> --source '<reconstructed-path>' --role prompt --provenance reconstructed --caption 'Reconstructed diagram for the question'
 ```
 
 Expected: one managed prompt attachment is returned for the saved item.
@@ -632,9 +632,9 @@ Expected: one managed prompt attachment is returned for the saved item.
 Run:
 
 ```powershell
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db quiz --course '交通规划与建模/Part A' --limit 3
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db export --course '交通规划与建模/Part A' --mode questions-only
-& 'C:\Users\Zippe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\Zippe\.codex\skills\summarize-mistake-notes\scripts\export_review_set.py' db attachment-audit
+& '<python>' '<script>' db quiz --course '<course>' --limit 3
+& '<python>' '<script>' db export --course '<course>' --mode questions-only
+& '<python>' '<script>' db attachment-audit
 ```
 
 Expected: quiz metadata and Markdown include the prompt image; the audit

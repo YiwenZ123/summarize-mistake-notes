@@ -20,7 +20,7 @@ Use this reference only when preparing import JSON, debugging `db validate`, or 
       "review_suggestion": "Redo three tangent-slope problems.",
       "attachments": [
         {
-          "source_path": "D:\\path\\diagram.png",
+          "source_path": "<source-image-path>",
           "role": "prompt",
           "provenance": "provided",
           "caption": "Graph shown in the question"
