@@ -1,59 +1,35 @@
 import hashlib
-import importlib.util
 import json
-import os
 import re
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-PYTHON = Path(sys.executable)
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "export_review_set.py"
-SKILL = ROOT / "SKILL.md"
-README = ROOT / "README.md"
-README_ZH_CN = ROOT / "README.zh-CN.md"
-MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-
-
-def write_image(path, image_format="PNG"):
-    Image.new("RGB", (4, 4), color=(20, 40, 60)).save(path, format=image_format)
-    return path
-
-
-def load_script_module():
-    spec = importlib.util.spec_from_file_location("export_review_set_under_test", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+from support import (  # noqa: E402
+    MAX_ATTACHMENT_BYTES,
+    PYTHON,
+    README,
+    README_ZH_CN,
+    ROOT,
+    SCRIPT,
+    SKILL,
+    CliTestCase,
+    load_script_module,
+    make_directory_link,
+    write_image,
+)
 
 
-def make_directory_link(link: Path, target: Path) -> None:
-    if sys.platform == "win32":
-        created = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        if created.returncode != 0:
-            raise OSError(created.stderr or created.stdout)
-    else:
-        os.symlink(target, link, target_is_directory=True)
-
-
-class AddQuestionSelectionTests(unittest.TestCase):
+class AddQuestionSelectionTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "exercise_bank.sqlite3"
-        self.input_path = Path(self.temp_dir.name) / "items.json"
+        super().setUp()
+        self.input_path = self.root / "items.json"
         self.input_path.write_text(
             json.dumps(
                 {
@@ -73,17 +49,6 @@ class AddQuestionSelectionTests(unittest.TestCase):
                     ],
                 }
             ),
-            encoding="utf-8",
-        )
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
             encoding="utf-8",
         )
 
@@ -140,24 +105,25 @@ class PortableDistributionInstructionsTests(unittest.TestCase):
         self.assertIn("本仓库不附带或预配置任何笔记根目录。", readme_zh)
         self.assertIn("首次需要访问数据库时", readme_zh)
 
+    def test_public_interfaces_are_agent_neutral(self):
+        public_files = (SKILL, README, README_ZH_CN, ROOT / "references" / "schema.md")
 
-class AttachmentFoundationTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        for path in public_files:
+            content = path.read_text(encoding="utf-8")
+            self.assertNotRegex(content, r"(?i)\bcodex\b", str(path))
+            self.assertNotIn("```powershell", content.lower(), str(path))
+            self.assertNotIn("scripts\\", content, str(path))
 
-    def tearDown(self):
-        self.temp_dir.cleanup()
+    def test_default_config_is_agent_neutral(self):
+        module = load_script_module()
 
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
+        self.assertEqual(
+            Path.home() / ".config" / "summarize-mistake-notes" / "config.json",
+            module.DEFAULT_CONFIG,
         )
 
+
+class AttachmentFoundationTests(CliTestCase):
     def make_input(self, *, attachments=None):
         input_path = self.root / "attachment-input.json"
         item = {
@@ -229,23 +195,10 @@ class AttachmentFoundationTests(unittest.TestCase):
         self.assertFalse((self.root / "attachments").exists())
 
 
-class AttachmentImportTests(unittest.TestCase):
+class AttachmentImportTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        super().setUp()
         self.image_path = write_image(self.root / "network.png")
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def make_input(self, *, attachment=True, role="prompt", source_path=None):
         item = {
@@ -453,7 +406,7 @@ class AttachmentImportTests(unittest.TestCase):
         self.assertEqual(0, added.returncode, added.stderr)
         item_id = json.loads(added.stdout)["ids"][0]
         module = load_script_module()
-        original_open = module.Image.open
+        original_open = Image.open
         source = self.image_path.resolve()
 
         class ReplacedAfterVerify:
@@ -483,9 +436,9 @@ class AttachmentImportTests(unittest.TestCase):
 
         context = module.StorageContext(self.db_path, self.root, self.root / "attachments")
         created_files = []
-        connection = module.connect_db(self.db_path)
+        connection = module.connect_db(context)
         try:
-            module.Image.open = swap_source_after_validation
+            Image.open = swap_source_after_validation
             try:
                 row = module.add_attachment_row(
                     connection,
@@ -501,7 +454,7 @@ class AttachmentImportTests(unittest.TestCase):
                 )
                 connection.commit()
             finally:
-                module.Image.open = original_open
+                Image.open = original_open
         finally:
             connection.close()
         managed_path = Path(module.serialize_attachment(row, context)["managed_path"])
@@ -509,11 +462,9 @@ class AttachmentImportTests(unittest.TestCase):
             copied.verify()
 
 
-class AttachmentPathSafetyTests(unittest.TestCase):
+class AttachmentPathSafetyTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        super().setUp()
         self.image_path = write_image(self.root / "diagram.png")
         self.input_path = self.root / "question.json"
         self.input_path.write_text(
@@ -548,17 +499,6 @@ class AttachmentPathSafetyTests(unittest.TestCase):
         )
         self.assertEqual(0, added.returncode, added.stderr)
         self.item_id = json.loads(added.stdout)["ids"][0]
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def attach(self):
         return self.run_cli(
@@ -659,11 +599,9 @@ class AttachmentPathSafetyTests(unittest.TestCase):
         self.assertTrue((outside / Path(attachment["managed_path"]).name).exists())
 
 
-class AttachmentVisibilityTests(unittest.TestCase):
+class AttachmentVisibilityTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        super().setUp()
         self.prompt_path = write_image(self.root / "prompt.png")
         self.solution_path = self.root / "solution.png"
         Image.new("RGB", (4, 4), color=(100, 120, 140)).save(self.solution_path, format="PNG")
@@ -713,17 +651,6 @@ class AttachmentVisibilityTests(unittest.TestCase):
             str(self.db_path),
         )
         self.assertEqual(0, added.returncode, added.stderr)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def export_content(self, mode):
         exported = self.run_cli(
@@ -840,11 +767,9 @@ class AttachmentVisibilityTests(unittest.TestCase):
         self.assertEqual(1, len(json.loads(audit.stdout)["modified_files"]))
 
 
-class AttachmentMaintenanceTests(unittest.TestCase):
+class AttachmentMaintenanceTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        super().setUp()
         prompt_path = write_image(self.root / "prompt.png")
         solution_path = self.root / "solution.png"
         Image.new("RGB", (4, 4), color=(150, 80, 10)).save(solution_path, format="PNG")
@@ -899,17 +824,6 @@ class AttachmentMaintenanceTests(unittest.TestCase):
         self.prompt = next(a for a in item["attachments"] if a["role"] == "prompt")
         self.solution = next(a for a in item["attachments"] if a["role"] == "solution")
         self.question_dir = Path(self.prompt["managed_path"]).parent
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def search_item(self):
         searched = self.run_cli("db", "search", "--db-path", str(self.db_path))
@@ -1029,11 +943,9 @@ class AttachmentMaintenanceTests(unittest.TestCase):
         self.assertFalse(orphan.exists())
 
 
-class ExportQuestionsTests(unittest.TestCase):
+class ExportQuestionsTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.db_path = self.root / "exercise_bank.sqlite3"
+        super().setUp()
         for course, topic, title, prompt, answer in (
             ("Course A", "Topic One", "A One", "Prompt A1?", "Secret answer A1"),
             ("Course A", "Topic Two", "A Two", "Prompt A2?", "Secret answer A2"),
@@ -1071,17 +983,6 @@ class ExportQuestionsTests(unittest.TestCase):
                 str(self.db_path),
             )
             self.assertEqual(0, added.returncode, added.stderr)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def exported_content(self, command):
         self.assertEqual(0, command.returncode, command.stderr)
@@ -1244,11 +1145,10 @@ class AttachmentInstructionsTests(unittest.TestCase):
             self.assertIn(token, schema)
 
 
-class DeleteQuestionTests(unittest.TestCase):
+class DeleteQuestionTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "exercise_bank.sqlite3"
-        self.input_path = Path(self.temp_dir.name) / "items.json"
+        super().setUp()
+        self.input_path = self.root / "items.json"
         self.input_path.write_text(
             json.dumps(
                 {
@@ -1281,17 +1181,6 @@ class DeleteQuestionTests(unittest.TestCase):
         )
         self.assertEqual(0, add.returncode, add.stderr)
         self.item_id = json.loads(add.stdout)["ids"][0]
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
 
     def test_delete_removes_question_and_its_review_events(self):
         marked = self.run_cli("db", "mark-wrong", self.item_id, "--db-path", str(self.db_path))
@@ -1340,11 +1229,10 @@ class DeleteAuthorizationInstructionsTests(unittest.TestCase):
         )
 
 
-class RenameCourseTests(unittest.TestCase):
+class RenameCourseTests(CliTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "exercise_bank.sqlite3"
-        self.input_path = Path(self.temp_dir.name) / "items.json"
+        super().setUp()
+        self.input_path = self.root / "items.json"
         self.input_path.write_text(
             json.dumps(
                 {
@@ -1399,17 +1287,6 @@ class RenameCourseTests(unittest.TestCase):
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertEqual(0, wrong.returncode, wrong.stderr)
 
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def run_cli(self, *args):
-        return subprocess.run(
-            [str(PYTHON), str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-
     def test_rename_requires_explicit_user_confirmation(self):
         rename = self.run_cli(
             "db", "rename-course", "Old Course", "New Course", "--db-path", str(self.db_path)
@@ -1456,7 +1333,7 @@ class RenameCourseTests(unittest.TestCase):
             connection.close()
 
     def test_rename_does_not_merge_into_existing_course(self):
-        second_input = Path(self.temp_dir.name) / "target.json"
+        second_input = self.root / "target.json"
         second_input.write_text(
             json.dumps(
                 {

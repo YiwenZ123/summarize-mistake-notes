@@ -27,12 +27,12 @@ The documentation will be available in both English and Simplified Chinese.
 The README serves three audiences:
 
 - learners who want an exercise bank with guided review workflows;
-- Codex users who want to install and invoke the skill;
+- agent users who want to install and invoke the skill;
 - contributors who need enough repository and validation context to change it
   responsibly.
 
 It is not a substitute for `SKILL.md`, which remains the operational
-instruction source used by Codex.
+instruction source used by the agent.
 
 ## Content Outline
 
@@ -66,7 +66,7 @@ Each language version will contain:
 - Examples will use path placeholders and example data, not a preconfigured
   notes root or any stored study materials.
 - The README will state that the repository ships with no notes-root setting
-  and that Codex asks for a storage folder on first database-backed use.
+  and that the agent asks for a storage folder on first database-backed use.
 - The README will explain that database writes should go through the script
   and that destructive attachment operations require explicit confirmation.
 

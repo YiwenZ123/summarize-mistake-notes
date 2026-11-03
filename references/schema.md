@@ -61,6 +61,38 @@ during quiz or questions-only export flows.
 
 Run validation before adding uncertain JSON:
 
-```powershell
+```bash
 <python> <script> db validate --input "<prepared-json-file>"
 ```
+
+## Identity And Re-Saving
+
+An item is identified by its course, `title`, and `original_question`. Adding an item that
+matches an existing one updates that item in place, even after the course was renamed. When the
+import's `collection_type` is `mistake_set`, the updated item also restarts its review schedule
+and is listed under `requeued` in the `db add` result.
+
+## Update JSON
+
+`db update <item_id> --input "<changes-json-file>"` takes a JSON object containing only the fields
+to change. Without `--confirmed-by-user` it changes nothing and prints a preview of each change.
+
+```json
+{
+  "original_question": "What is the derivative of x^2?",
+  "answer_points": ["2x, by the power rule."]
+}
+```
+
+| Field | Requirement |
+|---|---|
+| `course` | Non-empty string; moves the item to that course, creating it if needed. |
+| `topic` | Non-empty string. |
+| `collection_type` | `mistake_set` or `question_set`. |
+| `title`, `original_question`, `mistake_reason`, `correct_approach`, `review_suggestion` | Non-empty strings. |
+| `knowledge_points`, `answer_points` | Non-empty lists. |
+
+Review state, `source_date`, and attachments cannot be changed through `db update`; use
+`db grade`, `db reset`, `db attach`, `db attachment-update`, or `db detach` instead. An update
+that would make the item identical in course, title, and original question to another item is
+rejected.

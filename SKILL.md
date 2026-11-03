@@ -1,24 +1,25 @@
 ---
 name: summarize-mistake-notes
-description: Use when the user asks to save, add, search, export, review, quiz, revisit, filter, rename course classifications, or mark completed study questions, mistake notes, wrong answers, uncertain answers, homework corrections, exam review notes, course practice items, exercise-bank items, or asks to quiz/test them from saved study material.
+description: Organizes study questions, corrections, and mistake notes into a searchable SQLite exercise bank with spaced-repetition review, scoped Markdown exports, and optional image attachments. Use when the user asks to save, add, search, edit, export, review, quiz, revisit, filter, rename course classifications, reset review progress, or mark completed study questions, mistake notes, wrong answers, uncertain answers, homework corrections, exam review notes, course practice items, exercise-bank items, or asks to quiz/test them from saved study material or see what is due for review.
 ---
 
 # Mistake Note Organizer
 
 ## Overview
 
-Use a SQLite exercise bank to store study questions, mistake notes, and review state. Markdown export is only a backup/share format; never use Markdown as the primary store or review state.
+Use a SQLite exercise bank to store study questions, mistake notes, and review schedules. Markdown export is only a backup/share format; never use Markdown as the primary store or review state.
 
 ## Guardrails
 
-Resolve the installed script path and a Python 3 runtime with Pillow from the active Codex environment. Do not store machine-specific absolute paths or a configured notes root in this skill, do not search the current chat directory for the skill, and do not narrate skill loading, config checks, script discovery, validation, or Python troubleshooting to the user unless execution is truly blocked.
+Resolve the script relative to this `SKILL.md` and use any Python 3.9+ runtime. Pillow is needed only for image attachments; attachment commands report `PILLOW_REQUIRED` when it is missing. Do not resolve the script from the user's current workspace, store machine-specific absolute paths or a configured notes root in this skill, or narrate skill loading, config checks, script discovery, validation, or Python troubleshooting to the user unless execution is truly blocked.
 
 ## User-Facing Rules
 
 - The first user-facing sentence must advance the study task itself. Do not say that you are reading the skill, checking scripts, or inspecting config.
+- Write every user-facing message in the learner's language; the templates below show the structure, not the required wording.
 - Run technical checks silently. Mention them only when the save location is missing or a resolved command fails and blocks progress.
 - For add requests, ask for course/topic/collection classification and candidate-item selection in the same confirmation prompt. Show only candidate titles and original questions, not complete answers.
-- Before asking for add confirmation, silently run `<python> <script> db stats --human` and include the returned course list and counts in the same confirmation message. Do not list courses from memory.
+- Before asking for add confirmation, silently run `<python> <script> db stats --human --topics` and include the returned course list and counts in the same confirmation message. Reuse an existing course or topic name when one fits. Do not list courses from memory.
 - Do not write any item until the user explicitly selects which numbered candidates to save. Accept explicit responses such as `save 1, 3` or `save all`; classification confirmation alone is not authorization to write.
 - For export requests, identify a course or topic scope and ask whether to export `full` or `questions-only` if the user has not specified the mode.
 - Summarize the save only after the selected items are written successfully.
@@ -37,11 +38,11 @@ Candidate items:
 Please confirm the classification and which items to save, for example "classification correct, save 1" or "classification correct, save all".
 
 Available courses:
-1. <course> (<pending> pending / <total> total)
-2. <course> (<pending> pending / <total> total)
+1. <course> (<due> due / <pending> pending / <total> total)
+   - <topic> (<due> due / <pending> pending / <total> total)
 ```
 
-Before that reply, only run `<python> <script> db stats --human` silently. Do not read the current directory, run `rg`, search for scripts, explain config, try system `python`/`py`, or show complete answer content.
+Before that reply, only run `<python> <script> db stats --human --topics` silently. Do not read the current directory, run `rg`, search for scripts, explain config, try system `python`/`py`, or show complete answer content.
 
 If the course cannot be inferred, ask:
 
@@ -55,38 +56,40 @@ Candidate items:
 Please provide the course and which items to save.
 
 Available courses:
-1. <course> (<pending> pending / <total> total)
-2. <course> (<pending> pending / <total> total)
+1. <course> (<due> due / <pending> pending / <total> total)
+   - <topic> (<due> due / <pending> pending / <total> total)
 ```
 
 After the user confirms the classification and identifies the items to save:
 
-1. Silently check the save location; if missing, ask only for a folder path.
+1. Silently check the save location; if missing, follow Storage Setup.
 2. Prepare JSON with original question, answer points, correct approach, and review suggestion for the selected items only. Read `references/schema.md` only when field details are needed.
 3. Run `db validate`, then `db add --confirmed-selection-by-user`.
-4. Reply `Saved <N> items to <course> / <topic>`. Do not show internal JSON unless the user asks.
+4. Reply `Saved <N> items to <course> / <topic>`. If the result counts `updated` items, say they already existed and were updated; if it lists `requeued` items, say they were returned to review. Do not show internal JSON unless the user asks.
 
 If the user confirms the classification but does not choose items, ask which candidate numbers to save and do not run `db add`.
 
 ## Review Fast Path
 
-When the user asks to review, quiz, random-review, or be tested, first silently read the course list:
+When the user asks to review, quiz, random-review, or be tested, first silently read the course and topic list:
 
-```powershell
-<python> <script> db stats --human
+```bash
+<python> <script> db stats --human --topics
 ```
 
-Do not search files, inspect the current directory, run `rg`, explain environment setup, or look for the script path. List only courses returned by `db stats --human`.
+Do not search files, inspect the current directory, run `rg`, explain environment setup, or look for the script path. List only courses and topics returned by `db stats --human --topics`.
 
-If courses exist, the first user-facing reply must list them:
+If the request already names a scope (a course, a topic, a keyword, "anything", or "random", in any language), skip the question below and run the matching command from the table. Otherwise, if courses exist, the first user-facing reply must list them:
 
 ```text
 Which course or topic do you want to review? You can also say "review anything".
 
 Available courses:
-1. <course> (<pending> pending / <total> total)
-2. <course> (<pending> pending / <total> total)
+1. <course> (<due> due / <pending> pending / <total> total)
+   - <topic> (<due> due / <pending> pending / <total> total)
 ```
+
+In the counts, `due` means scheduled for today or earlier and `pending` means not mastered yet.
 
 If no course exists, reply:
 
@@ -94,75 +97,124 @@ If no course exists, reply:
 The exercise bank does not have any course records yet. You can first ask me to turn a conversation into a question set or mistake set.
 ```
 
-If the user gives a course or keyword:
+Choose the command from what the user names, using the exact course or topic name from the list:
 
-```powershell
-<python> <script> db quiz --course "<user answer>" --limit 3
-```
+| The user names | Command |
+| --- | --- |
+| A course | `<python> <script> db quiz --course "<course>" --limit 3` |
+| A topic | `<python> <script> db quiz --topic "<topic>" --limit 3` |
+| A keyword that is not a course or topic | `<python> <script> db quiz --query "<keyword>" --limit 3` |
+| "Review anything" or "what is due" | `<python> <script> db due --limit 3` |
+| "Random" | `<python> <script> db due --shuffle --limit 3` |
+| A whole course before an exam, including mastered items | `<python> <script> db quiz --course "<course>" --include-done --limit 3` |
 
-If the user says "review anything", "random", or "anything is fine":
+`db due` returns only items scheduled for today or earlier, most overdue first. If it returns nothing, say nothing is due today. When the learner has asked for more questions, continue directly with practice from `<python> <script> db quiz --shuffle --limit 3`, optionally limited to a course or topic, and say these are practice items that will not move the schedule; otherwise offer that practice.
 
-```powershell
-<python> <script> db due --limit 3
-```
+### Quiz Loop
 
-Ask one item at a time. Do not use `db pending --include-content` for quizzing because it includes answer content. Mark correct answers with `db mark-done <item_id>`. For wrong or incomplete answers, run `db mark-wrong <item_id> --note "<brief reason>"` and keep the item pending.
+Ask one item at a time:
+
+1. Show the question text and every available `prompt` image, then wait for the user's answer.
+2. After the user answers, silently run `<python> <script> db show <item_id>` to read the saved answer points, correct approach, mistake reason, and review history. Never run `db show` before the user has answered; it reveals the answer.
+3. Judge the answer against the saved answer points. `correct` means every answer point is right. `partial` means the approach is right and at least one answer point is fully right, but another is missing or wrong. `wrong` means the key result is wrong or missing. Skipped, "I don't know", and answer-peeking attempts are `wrong`.
+4. Record the result with `<python> <script> db grade <item_id> --result <correct|partial|wrong> --note "<brief reason>"`. A note is required for `partial` and `wrong`, for example "gave the formula but not the stability condition".
+5. Give feedback from the saved correct approach; `solution` images from `db show` may be shown now. If the answer repeats the saved mistake reason or a mistake recorded in the history, point that out. Tell the user the next review date from `schedule.next_review_at`, or that the item is mastered when `schedule.mastered` is true.
+6. Continue with the next returned item. When the returned items run out, run the same command again if it returned as many items as `--limit`; if it returned fewer items than `--limit`, say the set is finished and offer to stop or practice more. If the learner changes how they want to review, pick the matching command from the table.
+
+The CLI applies the schedule: a correct answer on a due item moves it to the next interval (1, 3, 7, 14, then 30 days) and masters it after the 30-day review; a correct answer on an item that is not due yet counts as practice and leaves the schedule unchanged (`schedule.advanced` is false); `partial` keeps the stage and brings the item back tomorrow; `wrong` restarts the schedule from tomorrow.
+
+`mark-done` masters an item permanently and removes it from future reviews; use it only when the user explicitly says an item no longer needs review. That explicit request is the authorization, so it takes no confirmation flag, and `db reset` can bring the item back. If the learner asks to stop reviewing an item instead of answering it, run `<python> <script> db mark-done <item_id>` without grading the attempt and without showing the saved answer, which its output contains; this takes precedence over grading a skipped attempt as `wrong`. Then confirm that the item is mastered and continue. `mark-wrong` is the same as `db grade --result wrong`.
+
+Do not use `db pending --include-content` or `db search --include-content` for quizzing because they include answer content.
 
 When the selected item returned by `db quiz` or `db due` includes attachments, display every available `prompt` attachment together with the question text in the same quiz message, in the returned order. Render each local image from its absolute `managed_path` using Markdown image syntax, such as `![<caption>](<managed_path>)`. If a `prompt` attachment has `missing: true` or cannot be displayed, still ask the text question and state briefly that the question image is currently unavailable. Never display a `solution` attachment while asking a quiz question.
 
-## Command Paths
+### Reset Review Progress
 
-Resolve these placeholders for the installed environment at runtime:
+When the user wants to restart a course or topic, for example to revise everything before an exam, run the reset without confirmation first. It changes nothing and returns a preview; tell the user how many items will restart and ask for confirmation before applying it:
 
-```text
-<script> = <installed-skill-directory>\scripts\export_review_set.py
-<python> = <python-3-runtime-with-pillow>
+```bash
+<python> <script> db reset --course "<course>"
+<python> <script> db reset --course "<course>" --confirmed-by-user
 ```
 
-Use a Python 3 runtime known to provide Pillow. Never replace the placeholders
-in the tracked skill with a developer-specific absolute path or notes-root
-value. During normal review, do not describe environment troubleshooting to
-the user. Only mention a blocker if the resolved command truly fails and
-there is no way to continue.
+Use `--topic "<topic>"` or specific item ids for a narrower reset.
+
+## Command Paths
+
+Resolve these placeholders for the active agent environment at runtime:
+
+```text
+<script> = <skill-directory>/scripts/export_review_set.py
+<python> = <python-3.9-or-newer-runtime>
+```
+
+Resolve `<skill-directory>` from this `SKILL.md`, not from the user's current workspace. Image attachment commands additionally need Pillow in that runtime. Command options, including `--config`, `--db-path`, and `--notes-root`, go after the full subcommand, for example `<python> <script> db stats --human --config "<config-file>"`. Never replace the placeholders in the tracked skill with a developer-specific absolute path or notes-root value. During normal review, do not describe environment troubleshooting to the user. Only mention a blocker if the resolved command truly fails and there is no way to continue.
 
 ## Storage Setup
 
-No notes root is preconfigured by this skill or repository. Check the configured save location only when the task actually needs database access; never make this the first user-facing reply.
+No notes root is preconfigured by this skill or repository. Check the configured save location only when the task actually needs database access; never make this the first user-facing reply. The default CLI config file is `~/.config/summarize-mistake-notes/config.json`; use `--config` when a different config file is needed.
+
+The fast paths run `db stats` directly instead of `config get`; whenever any command exits with code 3 or 4, handle it as described in this section.
 
 1. Silently check the configured save location:
-   ```powershell
+   ```bash
    <python> <script> config get
    ```
-2. If not configured, ask only:
+2. If it reports `NOT_CONFIGURED`, ask only:
    ```text
    The exercise bank does not have a configured save location yet. Which folder should store the exercise database? Please provide a folder path.
    ```
 3. Save the location:
-   ```powershell
+   ```bash
    <python> <script> config set --notes-root "<folder path>"
    ```
 4. The default database path is:
    ```text
-   <notes_root>\exercise_bank.sqlite3
+   <notes_root>/exercise_bank.sqlite3
    ```
 
+If any command reports `NOTES_ROOT_MISSING` or `NOTES_DB_MISSING`, the saved folder or its database is unavailable, for example because it was moved, renamed, disconnected, or a cloud folder has not finished syncing. Tell the user which path is missing and ask whether to restore it or choose another folder. Never create a replacement folder or database, and run `config set` only with a folder the user chooses.
+
 Never hand-edit the database file. All create/read/update operations must go through the script.
+
+## Exit Codes
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| 0 | Success | Continue. |
+| 1 | Error; the reason is on stderr | Report it once; do not retry in a loop. |
+| 2 | Invalid command arguments | Fix the command. |
+| 3 | `NOT_CONFIGURED` | Ask for a folder as described in Storage Setup. |
+| 4 | `NOTES_ROOT_MISSING` or `NOTES_DB_MISSING` | Ask the user about the missing location; never recreate it. |
+| 5 | Confirmation required; nothing changed | Show the `preview` printed on stdout, ask the user, then rerun with the confirmation flag. |
 
 ## Add Questions
 
 After the user confirms course/topic/collection type and explicitly selects candidate items, prepare JSON containing only selected items and validate it:
 
-```powershell
+```bash
 <python> <script> db validate --input "<prepared-json-file>"
 ```
 
 Then add it:
 
-```powershell
+```bash
 <python> <script> db add --input "<prepared-json-file>" --confirmed-selection-by-user
 ```
 
-Use `collection_type` values `mistake_set` or `question_set`. Never add candidates the user excluded or did not select. Re-adding the same course, title, and original question updates the existing item instead of creating a duplicate.
+Use `collection_type` values `mistake_set` or `question_set`. Never add candidates the user excluded or did not select. Re-adding the same course, title, and original question updates the existing item instead of creating a duplicate, including after a course rename. Re-saving an existing `mistake_set` item restarts its review schedule and lists it under `requeued`.
+
+## Edit Questions
+
+To fix a typo, correct an answer, or move an item to another course or topic, write a JSON object containing only the fields to change (see `references/schema.md`). Run the update without confirmation to get a preview, show the changes to the user, and apply them only after the user confirms:
+
+```bash
+<python> <script> db update <item_id> --input "<changes-json-file>"
+<python> <script> db update <item_id> --input "<changes-json-file>" --confirmed-by-user
+```
+
+The item keeps its id, attachments, and review history. Do not re-add an edited question as a new item.
 
 ## Optional Image Attachments
 
@@ -180,8 +232,8 @@ as `solution`. Use provenance `provided` for an accessible source image and
 image as the original.
 
 Solution images must not appear in `db quiz`, `db due`, or `questions-only` exports.
-Use `full` export or `db search --include-content` only when showing answer
-material is appropriate.
+Use `full` export, `db show` after the user has answered, or `db search --include-content`
+only when showing answer material is appropriate.
 
 For quiz output, returning a `prompt` attachment is an instruction to display
 it with the question, not merely metadata to ignore. Display all available
@@ -191,21 +243,21 @@ After the user has selected a candidate question and explicitly requested or
 approved an essential image, include the optional attachment object documented
 in `references/schema.md`, then use the normal validation and add flow:
 
-```powershell
+```bash
 <python> <script> db validate --input "<prepared-json-file>"
 <python> <script> db add --input "<prepared-json-file>" --confirmed-selection-by-user
 ```
 
 For an already-saved question, add an image without replacing the question:
 
-```powershell
+```bash
 <python> <script> db attach <item_id> --source "<image-path>" --role prompt --provenance provided --caption "<caption>"
 ```
 
 Changing an attachment role can reveal answer material during review. Only run
 metadata changes or deletion after explicit user authorization:
 
-```powershell
+```bash
 <python> <script> db attachment-update <attachment_id> --role <prompt|solution> --confirmed-by-user
 <python> <script> db detach <attachment_id> --confirmed-by-user
 <python> <script> db delete <item_id> --confirmed-by-user
@@ -221,34 +273,19 @@ handle directly.
 
 ## Search Questions
 
-Search by keyword:
+`--query` searches all saved text; `--course` and `--topic` match name substrings and can be combined:
 
-```powershell
+```bash
 <python> <script> db search --query "derivative" --limit 10 --include-content
-```
-
-Search by course:
-
-```powershell
-<python> <script> db search --course "Calculus" --limit 10 --include-content
-```
-
-Search only pending items:
-
-```powershell
+<python> <script> db search --course "Calculus" --topic "Derivatives" --limit 10 --include-content
 <python> <script> db search --review-status pending --limit 10
 ```
 
-View JSON course stats:
+View course stats as JSON, or as a user-facing list with per-topic counts:
 
-```powershell
+```bash
 <python> <script> db stats
-```
-
-View a user-facing course list:
-
-```powershell
-<python> <script> db stats --human
+<python> <script> db stats --human --topics
 ```
 
 ## Export Questions
@@ -259,18 +296,18 @@ If no course or topic is given, ask for the export scope first. Do not export al
 
 Export a full question-and-answer file:
 
-```powershell
+```bash
 <python> <script> db export --course "<course>" --mode full
 ```
 
 Export a self-test file containing titles and question prompts only:
 
-```powershell
+```bash
 <python> <script> db export --topic "<topic>" --mode questions-only
 ```
 
 To narrow a topic to one course, provide both filters. Saved files are written under
-`<notes_root>\exports\`. A `full` export contains only each question title, `### 问题`, and `### 回答`.
+`<notes_root>/exports/`. A `full` export contains only each question title, `### 问题`, and `### 回答`.
 The answer is rendered from saved answer points. Do not include database metadata, review status, knowledge points, correct approach, or review suggestion.
 A `questions-only` export contains only each title and `### 问题`; it must not reveal answer points.
 
@@ -281,9 +318,11 @@ Do not infer authorization from translation, spelling cleanup, duplicate-looking
 suggested reorganization. Never silently merge an existing target course into another course.
 
 Before asking for confirmation, run `db stats --human` to identify the current course name and
-tell the user the proposed new name. After confirmation, rename through the database command:
+tell the user the proposed new name. Running the rename without `--confirmed-by-user` changes
+nothing and returns a preview with the number of affected questions. After confirmation, rename
+through the database command:
 
-```powershell
+```bash
 <python> <script> db rename-course "<old-course>" "<new-course>" --confirmed-by-user
 ```
 
@@ -295,10 +334,11 @@ search index. After it succeeds, run `db stats --human` to verify the renamed co
 Only run deletion after the user explicitly requests permanent deletion or confirms it. Do not
 infer authorization from a duplicated, incomplete, incorrect, skipped, or inconvenient question.
 
-Before deletion, identify the exact stored question and item ID. After confirmation, delete only
-that ID:
+Before deletion, identify the exact stored question and item ID. Running `db delete <item_id>`
+without `--confirmed-by-user` changes nothing and prints a preview of the item; show it when asking
+for confirmation. After confirmation, delete only that ID:
 
-```powershell
+```bash
 <python> <script> db delete <item_id> --confirmed-by-user
 ```
 
@@ -309,7 +349,7 @@ After deletion, search for the removed item or run `db stats --human` to verify 
 Markdown export is only for backup, sharing, or self-test sheets. It does not create, read, or
 update review state:
 
-```powershell
+```bash
 <python> <script> export --input "<prepared-json-file>"
 ```
 
@@ -320,8 +360,8 @@ New notes, searches, review prompts, and completion state must use SQLite `db` c
 - Save only clear study questions, mistake notes, corrections, or review-worthy content. Do not save casual chat or tool-operation issues.
 - Mistake reasons must be specific, such as "confused function value with rate of change"; do not write only "careless".
 - Review suggestions must be actionable, such as "redo three similar tangent-slope problems".
-- Wrong, skipped, or answer-peeking attempts must not be marked done.
-- For "review anything", use `db due` so older pending items come first.
+- Wrong, skipped, or answer-peeking attempts must be graded `wrong`, never `correct` or `mark-done`, unless the learner explicitly asks to stop reviewing that item.
+- For "review anything", use `db due` so the most overdue items come first.
 
 ## Common Mistakes
 
@@ -330,16 +370,19 @@ New notes, searches, review prompts, and completion state must use SQLite `db` c
 - Treating classification confirmation as permission to save every candidate item.
 - Showing complete answers before the user selects which items to save.
 - Narrating internal steps such as reading the skill, checking config, finding scripts, or switching Python.
-- Continuing after PowerShell shows mojibake. Re-read with `Get-Content -Encoding UTF8`.
-- Using a Python runtime without Pillow or committing an environment-specific runtime path into the skill.
+- Continuing after terminal output shows mojibake. Re-read the output as UTF-8 before acting on it.
+- Committing an environment-specific runtime path into the skill.
 - Searching Markdown files instead of using `db search`.
+- Passing a topic or keyword to `--course`; use `--topic` or `--query`.
 - Quizzing with `db pending --include-content`; use `db quiz` or `db due` instead.
+- Running `db show` before the user answers, or grading from memory instead of the saved answer points.
+- Grading a correct quiz answer with `mark-done`; use `db grade --result correct` so the schedule continues.
 - Omitting an available `prompt` attachment when displaying a quiz question returned by `db quiz` or `db due`.
 - Exporting all stored questions without the user choosing a course or topic scope.
 - Including answers in a `questions-only` export, or including internal review metadata in either exported reading format.
-- Marking wrong answers with `mark-done`; wrong answers must use `mark-wrong`.
 - Revealing a `solution` image through `db quiz`, `db due`, or a `questions-only` export.
 - Changing, detaching, or deleting image attachments without explicit user authorization.
-- Renaming a course without the user's explicit confirmation of both the old and new names.
+- Renaming a course, resetting review progress, or editing a saved question without the user's explicit confirmation.
 - Deleting a question without the user's explicit request or confirmation of permanent deletion.
-- Asking what to review without listing courses from `db stats --human`.
+- Creating a new folder or database after `NOTES_ROOT_MISSING` or `NOTES_DB_MISSING` instead of asking the user.
+- Asking what to review without listing courses from `db stats --human --topics`.

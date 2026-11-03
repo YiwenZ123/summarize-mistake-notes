@@ -285,7 +285,7 @@ Rules:
   `--confirmed-by-user` switch are both provided; unsafe paths are never
   followed for cleanup.
 
-The skill instructions must be updated so Codex requests explicit user
+The skill instructions must be updated so the agent requests explicit user
 selection before adding question attachments and explicit authorization before
 attachment metadata changes, detach, or question deletion.
 
